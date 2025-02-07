@@ -1,0 +1,2 @@
+# meco
+MEga COnstellation emulator
