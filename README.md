@@ -206,13 +206,10 @@ This project is licensed under the **Apache License 2.0**. See the [LICENSE](LIC
 
 ## Future Improvements
 - Add Docker support for containerized deployment
-- Implement TLS encryption for secure gRPC communication
 - Add unit tests for CLI and gRPC services
 
 ---
 
 ## Contributors
-- Your Name - Maintainer
-- Contributor Name - Feature Development
-- Reviewer Name - Code Review
+- Stefano Salsano - Maintainer
 
