@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package meco;
+
+// Define the gRPC service
+service MecoService {
+  // Existing RPC
+  rpc MecoCall (MecoRequest) returns (MecoResponse);
+
+  // New RPC: Start
+  rpc Start (ResourceDescriptor) returns (StartResponse);
+}
+
+// Messages for MecoCall
+message MecoRequest {
+  string message = 1;
+}
+
+message MecoResponse {
+  string message = 1;
+}
+
+// Message used by the Start RPC
+message ResourceDescriptor {
+  string file_path = 1;
+}
+
+// Response from the Start RPC
+message StartResponse {
+  bool success = 1;
+  string message = 2;
+}
