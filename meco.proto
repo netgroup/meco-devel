@@ -7,7 +7,7 @@ service MecoService {
   // Existing RPC
   rpc MecoCall (MecoRequest) returns (MecoResponse);
 
-  // New RPC: Start
+  // Updated RPC: Start now supports both a filename and inline file content
   rpc Start (ResourceDescriptor) returns (StartResponse);
 }
 
@@ -22,7 +22,11 @@ message MecoResponse {
 
 // Message used by the Start RPC
 message ResourceDescriptor {
-  string file_path = 1;
+  oneof file_data {
+    string file_path = 1;    // The path to the file (if provided)
+    string file_content = 2; // The actual file content (if inline)
+  }
+  optional string save_as = 3; // Optional: If file_content is provided, store it as this filename on the server
 }
 
 // Response from the Start RPC

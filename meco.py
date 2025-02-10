@@ -25,42 +25,60 @@ logging.basicConfig(
 logger = logging.getLogger("meco")
 
 # PID file for tracking the daemonized server
-PID_FILE = '/tmp/meco_server.pid'
+PID_FILE = "/tmp/meco_server.pid"
+UPLOADS_DIR = "/tmp/meco_uploads"  # Directory for storing received files
 
 
 class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
     """
     Implements:
     1) MecoCall - a simple echo RPC.
-    2) Start - receives a resource descriptor file.
+    2) Start - supports both file_path and file_content with optional saving.
     """
 
     def MecoCall(self, request, context):
         logger.info(f"MecoCall received: {request.message}")
-        response_msg = f"Hello from M-E-C-O! You said: '{request.message}'"
+        response_msg = f"Hello from M-E-C-O! You said: {request.message}"
         return meco_pb2.MecoResponse(message=response_msg)
 
     def Start(self, request, context):
-        file_path = request.file_path
-        logger.info(f"Start() called with resource descriptor file: {file_path}")
+        """Handles Start RPC request with either file_path or file_content."""
+        if request.HasField("file_path"):
+            file_path = request.file_path
+            logger.info(f"Start() received a file path: {file_path}")
 
-        if not file_path:
-            logger.error("No file path provided.")
-            return meco_pb2.StartResponse(success=False, message="No file path provided.")
+            if not os.path.isfile(file_path):
+                logger.error(f"File does not exist: {file_path}")
+                return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
 
-        if os.path.isfile(file_path):
-            logger.info(f"Successfully started with resource file: {file_path}")
-            return meco_pb2.StartResponse(success=True, message=f"Successfully started with resource file: {file_path}")
+            with open(file_path, "r", encoding="utf-8") as f:
+                file_content = f.read()
+            logger.info(f"Successfully read file from path: {file_path}")
+
+        elif request.HasField("file_content"):
+            file_content = request.file_content
+            logger.info("Start() received inline file content.")
+
+            if request.HasField("save_as"):
+                save_path = os.path.join(UPLOADS_DIR, request.save_as)
+                os.makedirs(UPLOADS_DIR, exist_ok=True)
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(file_content)
+                logger.info(f"File content saved to: {save_path}")
+
         else:
-            logger.error(f"File does not exist: {file_path}")
-            return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
+            logger.error("Start() request missing both file_path and file_content.")
+            return meco_pb2.StartResponse(success=False, message="No file_path or file_content provided.")
+
+        logger.info(f"Processing file content: {file_content[:50]}...")  # Log first 50 chars
+        return meco_pb2.StartResponse(success=True, message="File content processed successfully.")
 
 
 def serve_forever():
     """Starts the gRPC server and runs indefinitely."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     meco_pb2_grpc.add_MecoServiceServicer_to_server(MecoServiceServicer(), server)
-    server.add_insecure_port('[::]:50051')
+    server.add_insecure_port("[::]:50051")
     server.start()
     logger.info("Meco gRPC server started on port 50051.")
 
@@ -84,7 +102,7 @@ def is_running(pid):
 def server_on():
     """Turns the server ON (daemonizes it)."""
     if os.path.exists(PID_FILE):
-        with open(PID_FILE, 'r') as f:
+        with open(PID_FILE, "r") as f:
             old_pid = int(f.read().strip())
         if is_running(old_pid):
             logger.warning(f"Meco server is already ON (PID: {old_pid}).")
@@ -94,7 +112,7 @@ def server_on():
 
     pid = os.fork()
     if pid > 0:
-        with open(PID_FILE, 'w') as f:
+        with open(PID_FILE, "w") as f:
             f.write(str(pid))
         logger.info(f"Meco server turned ON in background (PID: {pid}).")
         sys.exit(0)
@@ -112,7 +130,7 @@ def server_off():
         logger.warning("No PID file found. Meco server might be OFF already.")
         return
 
-    with open(PID_FILE, 'r') as f:
+    with open(PID_FILE, "r") as f:
         pid = int(f.read().strip())
 
     if not is_running(pid):
@@ -126,22 +144,28 @@ def server_off():
     logger.info("Meco server turned OFF.")
 
 
-def start_resource_descriptor(filename):
-    """Sends the resource descriptor file to the gRPC server."""
-    if not os.path.exists(filename):
-        logger.error(f"Error: File '{filename}' does not exist.")
-        sys.exit(1)
-
-    channel = grpc.insecure_channel('localhost:50051')
+def start_resource_descriptor(filename=None, file_content=None, save_as=None):
+    """Sends either a file_path or file_content to the gRPC server, with optional save_as."""
+    channel = grpc.insecure_channel("localhost:50051")
     stub = meco_pb2_grpc.MecoServiceStub(channel)
 
-    request = meco_pb2.ResourceDescriptor(file_path=filename)
+    if filename:
+        if not os.path.exists(filename):
+            logger.error(f'Error: File "{filename}" does not exist.')
+            sys.exit(1)
+        request = meco_pb2.ResourceDescriptor(file_path=filename)
+    elif file_content:
+        request = meco_pb2.ResourceDescriptor(file_content=file_content, save_as=save_as)
+    else:
+        logger.error("Error: No filename or file content provided.")
+        sys.exit(1)
+
     response = stub.Start(request)
 
     if response.success:
-        logger.info(f"Successfully started with resource file: {filename}")
+        logger.info(f"Successfully processed resource: {response.message}")
     else:
-        logger.error(f"Failed to start: {response.message}")
+        logger.error(f"Failed to process resource: {response.message}")
 
 
 def create_parser():
@@ -157,7 +181,9 @@ def create_parser():
     subparsers.add_parser("off", help="Turn the Meco gRPC server OFF")
 
     start_parser = subparsers.add_parser("start", help="Send a resource descriptor file to the Meco server")
-    start_parser.add_argument("filename", help="Path to the resource descriptor file")
+    start_parser.add_argument("filename", nargs="?", help="Path to the resource descriptor file")
+    start_parser.add_argument("--content", help="Provide file content directly as a string")
+    start_parser.add_argument("--save-as", help="Filename to store the file on the server (if using content)")
 
     return parser
 
@@ -181,11 +207,11 @@ def main():
     parser_dict = {
         "on": lambda _: server_on(),
         "off": lambda _: server_off(),
-        "start": lambda args: start_resource_descriptor(args.filename),
+        "start": lambda args: start_resource_descriptor(args.filename, args.content, args.save_as),
     }
 
     handle_command(args, parser, parser_dict)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
