@@ -143,30 +143,56 @@ Log levels used:
 
 ## Development Setup
 
-### Clone the Repository
+### 1. Clone the Repository
 ```bash
 git clone https://github.com/your-repo/meco.git
 cd meco
 ```
 
-### Install Dependencies
+### 2. Set Up a Python Virtual Environment
+It is recommended to use a virtual environment to isolate dependencies.  
+
+#### Create and Activate the Virtual Environment:
+For **Linux/macOS**:
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+For **Windows**:
+```powershell
+python -m venv venv
+venv\Scripts\activate
+```
+
+#### Install Dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-### Compile gRPC Stubs
+#### Verify Installation:
+```bash
+python -m grpc_tools.protoc --version
+```
+
+### 3. Compile gRPC Stubs
 ```bash
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
 ```
 
-### Run the Server in Debug Mode
+### 4. Run the Server in Debug Mode
 ```bash
 python meco.py on
 ```
 
-### Run the Client for Testing
+### 5. Run the Client for Testing
 ```bash
 python meco.py start test.json
+```
+
+### 6. Deactivate the Virtual Environment (When Done)
+```bash
+deactivate
 ```
 
 ---
@@ -212,4 +238,3 @@ This project is licensed under the **Apache License 2.0**. See the [LICENSE](LIC
 
 ## Contributors
 - Stefano Salsano - Maintainer
-
