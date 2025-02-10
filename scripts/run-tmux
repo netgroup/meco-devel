@@ -1,0 +1,30 @@
+#!/bin/bash
+
+TMUX=my_tmux
+
+read -r -d '' w1_env <<-EOF
+    echo "To exit from the tmux session type Ctrl-b d"
+    /bin/bash
+EOF
+
+
+tmux new-session -d -s $TMUX -n W0 bash -c "$w1_env"
+tmux new-window -t $TMUX -n W1
+tmux new-window -t $TMUX -n W2
+tmux new-window -t $TMUX -n W3
+tmux new-window -t $TMUX -n W4
+tmux new-window -t $TMUX -n W5
+tmux new-window -t $TMUX -n W6
+tmux new-window -t $TMUX -n W7
+tmux new-window -t $TMUX -n W8
+tmux new-window -t $TMUX -n W9
+tmux new-window -t $TMUX -n W10
+tmux new-window -t $TMUX -n W11
+tmux new-window -t $TMUX -n W12
+tmux new-window -t $TMUX -n W13
+tmux new-window -t $TMUX -n W14
+tmux new-window -t $TMUX -n W15
+
+tmux select-window -t $TMUX:W0
+tmux set-option -g mouse on
+tmux attach -t $TMUX

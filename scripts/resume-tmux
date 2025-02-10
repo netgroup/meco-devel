@@ -1,0 +1,27 @@
+#!/bin/bash
+# This script resumes a tmux session named 'my_tmux'.
+# It first checks if the session is running. If not, it tries to start the session using 'run-tmux'.
+# The script can be called from the folder where 'resume-tmux' and 'run-tmux' are located,
+# or from the 'nccl-handson' directory with './nccl-handson/resume-tmux'.
+
+# Check if the tmux session 'my_tmux' is already running
+if ! tmux ls | grep -q "^my_tmux:"; then
+    echo "Session 'my_tmux' not found. Attempting to start tmux..."
+
+    # Check if './run-tmux' exists and run it
+    if [ -f "./run-tmux" ]; then
+        echo "Found './run-tmux'. Starting tmux..."
+        ./run-tmux
+    # If not found, check if './nccl-handson/run-tmux' exists and run it
+    elif [ -f "./nccl-handson/run-tmux" ]; then
+        echo "Found './nccl-handson/run-tmux'. Starting tmux..."
+        ./nccl-handson/run-tmux
+    else
+        echo "Error: 'run-tmux' script not found in either location."
+        exit 1
+    fi
+else
+    # Enable mouse mode and attach to the 'my_tmux' session
+    tmux set-option -g mouse on
+    tmux attach -t my_tmux
+fi
