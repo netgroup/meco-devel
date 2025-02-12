@@ -9,6 +9,8 @@ import argcomplete
 import logging
 import grpc
 from concurrent import futures
+import yaml
+import json
 
 import meco_pb2
 import meco_pb2_grpc
@@ -42,37 +44,60 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         return meco_pb2.MecoResponse(message=response_msg)
 
     def Start(self, request, context):
-        """Handles Start RPC request with either file_path or file_content."""
-        if request.HasField("file_path"):
-            file_path = request.file_path
-            logger.info(f"Start() received a file path: {file_path}")
+        """Handles the Start RPC, processing file path or content."""
+        try:
+            file_content = None  # Initialize file_content
 
-            if not os.path.isfile(file_path):
-                logger.error(f"File does not exist: {file_path}")
-                return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
+            if request.HasField("file_path"):
+                file_path = request.file_path
+                logger.info(f"Start() received a file path: {file_path}")
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-            logger.info(f"Successfully read file from path: {file_path}")
+                if not os.path.isfile(file_path):
+                    logger.error(f"File does not exist: {file_path}")
+                    return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
 
-        elif request.HasField("file_content"):
-            file_content = request.file_content
-            logger.info("Start() received inline file content.")
+                with open(file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read()  # Read as string
+                logger.info(f"Successfully read file from path: {file_path}")
 
-            if request.HasField("save_as"):
-                save_path = os.path.join(UPLOADS_DIR, request.save_as)
-                os.makedirs(UPLOADS_DIR, exist_ok=True)
-                with open(save_path, "w", encoding="utf-8") as f:
-                    f.write(file_content)
-                logger.info(f"File content saved to: {save_path}")
+            elif request.HasField("file_content"):
+                file_content = request.file_content
+                logger.info("Start() received inline file content.")
 
-        else:
-            logger.error("Start() request missing both file_path and file_content.")
-            return meco_pb2.StartResponse(success=False, message="No file_path or file_content provided.")
+            else:
+                logger.error("Start() request missing both file_path and file_content.")
+                return meco_pb2.StartResponse(success=False, message="No file_path or file_content provided.")
 
-        logger.info(f"Processing file content: {file_content[:50]}...")  # Log first 50 chars
-        return meco_pb2.StartResponse(success=True, message="File content processed successfully.")
+            if file_content is None: # Handle the case where no file content was received.
+                return meco_pb2.StartResponse(success=False, message="No file content to process.")
 
+            try:
+                # Attempt to parse as JSON first
+                data = json.loads(file_content)
+                logger.info("File parsed as JSON successfully.")
+
+                if request.HasField("save_as"):  # Only save if save_as is provided
+                    save_path = os.path.join(UPLOADS_DIR, request.save_as + ".yaml")  # Save as YAML
+                    os.makedirs(UPLOADS_DIR, exist_ok=True)
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        yaml.dump(data, f)  # Dump as YAML
+                    logger.info(f"JSON data saved to: {save_path}")
+
+            except json.JSONDecodeError as e:  # Catch JSON errors
+                logger.error(f"Failed to parse file as JSON: {e}")
+                return meco_pb2.StartResponse(success=False, message=f"Invalid JSON format: {e}")
+            except Exception as e: # Catch other potential errors
+                logger.exception(f"An error occurred during file saving: {e}")
+                return meco_pb2.StartResponse(success=False, message=f"Error saving file: {e}")
+
+            # Process the loaded data here (e.g., validate, extract info, etc.)
+            logger.info(f"Processed data (first 50 characters): {str(data)[:50]}...")
+
+            return meco_pb2.StartResponse(success=True, message="File content processed and saved successfully.")
+
+        except Exception as e:  # Catch any other unexpected errors
+            logger.exception(f"An unexpected error occurred: {e}")
+            return meco_pb2.StartResponse(success=False, message=f"An unexpected error occurred: {e}")
 
 def serve_forever():
     """Starts the gRPC server and runs indefinitely."""
