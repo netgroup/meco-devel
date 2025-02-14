@@ -11,6 +11,7 @@ import grpc
 from concurrent import futures
 import yaml
 import json
+import psutil  # For process checking
 
 import meco_pb2
 import meco_pb2_grpc
@@ -26,8 +27,8 @@ logging.basicConfig(
 
 logger = logging.getLogger("meco")
 
-# PID file for tracking the daemonized server
-PID_FILE = "/tmp/meco_server.pid"
+
+PID_FILE = "/tmp/meco_server.pid"   # PID file for tracking the daemonized server
 UPLOADS_DIR = "/tmp/meco_uploads"  # Directory for storing received files
 
 
@@ -150,23 +151,52 @@ def server_on():
 
 
 def server_off():
-    """Turns the server OFF."""
-    if not os.path.exists(PID_FILE):
-        logger.warning("No PID file found. Meco server might be OFF already.")
-        return
+    """Turns the server OFF (robust shutdown - kills ALL meco.py processes)."""
 
-    with open(PID_FILE, "r") as f:
-        pid = int(f.read().strip())
+    # 1. Kill ALL meco.py processes
+    killed_pids = []  # Keep track of killed PIDs to avoid double killing
+    server_process_found = False  # Flag to track if any server process (except this one) is found
+    
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.pid == os.getpid():
+                continue    # Skip the current process to avoid killing the off command itself
+            
+            if "meco.py" in " ".join(proc.cmdline()):
+                server_process_found = True
+                logger.info(f"Killing meco.py process (PID: {proc.pid})")
 
-    if not is_running(pid):
-        logger.warning("Server process not found. Removing stale PID file.")
+                # 1. SIGTERM (Polite Shutdown) first
+                os.kill(proc.pid, signal.SIGTERM)
+
+                # 2. Wait for Termination (with timeout)
+                timeout = 5  # seconds
+                for _ in range(timeout):
+                    if not psutil.pid_exists(proc.pid):
+                        break  # Process terminated
+                    time.sleep(1)
+                else:  # If the loop finishes without breaking (timeout)
+                # 3. SIGKILL (Forceful Kill)
+                    logger.warning(f"Process (PID: {proc.pid}) did not respond to SIGTERM. Sending SIGKILL.")
+                    os.kill(proc.pid, signal.SIGKILL)
+
+                killed_pids.append(proc.pid)  # Add PID to list of killed ones
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass  # Process might have already exited
+
+    # If no server processes (other than the current off command) are found, log that info.
+    if not server_process_found:
+        logger.info("All server-related processes are off.")
+
+    # 2. Remove PID file (if it exists – it might not if the server crashed)
+    try:
         os.remove(PID_FILE)
-        return
+        logger.info("PID file removed.")
+    except FileNotFoundError:
+        pass  # It's okay if the file wasn't there
 
-    logger.info(f"Turning OFF Meco server (PID: {pid})...")
-    os.kill(pid, signal.SIGTERM)
-    os.remove(PID_FILE)
-    logger.info("Meco server turned OFF.")
+    sys.exit(0)  # Exit after killing processes
 
 
 def start_resource_descriptor(filename=None, file_content=None, save_as=None):
@@ -223,6 +253,16 @@ def handle_command(args, parser, parser_dict):
         sys.exit(1)
 
 
+def signal_handler(sig, frame):
+    print('You pressed Ctrl+C!')
+    try:
+        if os.path.exists(PID_FILE): # Remove the PID file if it exists
+            os.remove(PID_FILE)
+    except Exception as e:
+        print(f"Error removing PID file: {e}")
+    sys.exit(0)  # Exit cleanly
+
+
 def main():
     """Main function to parse arguments and execute commands."""
     parser = create_parser()
@@ -236,6 +276,21 @@ def main():
     }
 
     handle_command(args, parser, parser_dict)
+    
+    if args.command == 'on': # Only start server if the command is 'on'
+        signal.signal(signal.SIGINT, signal_handler)  # Register the signal handler
+
+        try:
+            with open(PID_FILE, "w") as f:
+                f.write(str(os.getpid()))
+
+            server_on()  # Start the gRPC server
+
+        finally:
+            try:
+                os.remove(PID_FILE)  # Remove the PID file when the server is stopped
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":
