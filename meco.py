@@ -254,12 +254,12 @@ def handle_command(args, parser, parser_dict):
 
 
 def signal_handler(sig, frame):
-    print('You pressed Ctrl+C!')
+    logger.info('You pressed Ctrl+C!')
     try:
         if os.path.exists(PID_FILE): # Remove the PID file if it exists
             os.remove(PID_FILE)
     except Exception as e:
-        print(f"Error removing PID file: {e}")
+        logger.error(f"Error removing PID file: {e}")
     sys.exit(0)  # Exit cleanly
 
 
