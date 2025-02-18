@@ -9,6 +9,9 @@ import argcomplete
 import logging
 import grpc
 from concurrent import futures
+import yaml
+import json
+import psutil  # For process checking
 
 import meco_pb2
 import meco_pb2_grpc
@@ -24,8 +27,8 @@ logging.basicConfig(
 
 logger = logging.getLogger("meco")
 
-# PID file for tracking the daemonized server
-PID_FILE = "/tmp/meco_server.pid"
+
+PID_FILE = "/tmp/meco_server.pid"   # PID file for tracking the daemonized server
 UPLOADS_DIR = "/tmp/meco_uploads"  # Directory for storing received files
 
 
@@ -42,37 +45,60 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         return meco_pb2.MecoResponse(message=response_msg)
 
     def Start(self, request, context):
-        """Handles Start RPC request with either file_path or file_content."""
-        if request.HasField("file_path"):
-            file_path = request.file_path
-            logger.info(f"Start() received a file path: {file_path}")
+        """Handles the Start RPC, processing file path or content."""
+        try:
+            file_content = None  # Initialize file_content
 
-            if not os.path.isfile(file_path):
-                logger.error(f"File does not exist: {file_path}")
-                return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
+            if request.HasField("file_path"):
+                file_path = request.file_path
+                logger.info(f"Start() received a file path: {file_path}")
 
-            with open(file_path, "r", encoding="utf-8") as f:
-                file_content = f.read()
-            logger.info(f"Successfully read file from path: {file_path}")
+                if not os.path.isfile(file_path):
+                    logger.error(f"File does not exist: {file_path}")
+                    return meco_pb2.StartResponse(success=False, message=f"File does not exist: {file_path}")
 
-        elif request.HasField("file_content"):
-            file_content = request.file_content
-            logger.info("Start() received inline file content.")
+                with open(file_path, "r", encoding="utf-8") as f:
+                    file_content = f.read()  # Read as string
+                logger.info(f"Successfully read file from path: {file_path}")
 
-            if request.HasField("save_as"):
-                save_path = os.path.join(UPLOADS_DIR, request.save_as)
-                os.makedirs(UPLOADS_DIR, exist_ok=True)
-                with open(save_path, "w", encoding="utf-8") as f:
-                    f.write(file_content)
-                logger.info(f"File content saved to: {save_path}")
+            elif request.HasField("file_content"):
+                file_content = request.file_content
+                logger.info("Start() received inline file content.")
 
-        else:
-            logger.error("Start() request missing both file_path and file_content.")
-            return meco_pb2.StartResponse(success=False, message="No file_path or file_content provided.")
+            else:
+                logger.error("Start() request missing both file_path and file_content.")
+                return meco_pb2.StartResponse(success=False, message="No file_path or file_content provided.")
 
-        logger.info(f"Processing file content: {file_content[:50]}...")  # Log first 50 chars
-        return meco_pb2.StartResponse(success=True, message="File content processed successfully.")
+            if file_content is None: # Handle the case where no file content was received.
+                return meco_pb2.StartResponse(success=False, message="No file content to process.")
 
+            try:
+                # Attempt to parse as JSON first
+                data = json.loads(file_content)
+                logger.info("File parsed as JSON successfully.")
+
+                if request.HasField("save_as"):  # Only save if save_as is provided
+                    save_path = os.path.join(UPLOADS_DIR, request.save_as + ".yaml")  # Save as YAML
+                    os.makedirs(UPLOADS_DIR, exist_ok=True)
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        yaml.dump(data, f)  # Dump as YAML
+                    logger.info(f"JSON data saved to: {save_path}")
+
+            except json.JSONDecodeError as e:  # Catch JSON errors
+                logger.error(f"Failed to parse file as JSON: {e}")
+                return meco_pb2.StartResponse(success=False, message=f"Invalid JSON format: {e}")
+            except Exception as e: # Catch other potential errors
+                logger.exception(f"An error occurred during file saving: {e}")
+                return meco_pb2.StartResponse(success=False, message=f"Error saving file: {e}")
+
+            # Process the loaded data here (e.g., validate, extract info, etc.)
+            logger.info(f"Processed data (first 50 characters): {str(data)[:50]}...")
+
+            return meco_pb2.StartResponse(success=True, message="File content processed and saved successfully.")
+
+        except Exception as e:  # Catch any other unexpected errors
+            logger.exception(f"An unexpected error occurred: {e}")
+            return meco_pb2.StartResponse(success=False, message=f"An unexpected error occurred: {e}")
 
 def serve_forever():
     """Starts the gRPC server and runs indefinitely."""
@@ -125,23 +151,52 @@ def server_on():
 
 
 def server_off():
-    """Turns the server OFF."""
-    if not os.path.exists(PID_FILE):
-        logger.warning("No PID file found. Meco server might be OFF already.")
-        return
+    """Turns the server OFF (robust shutdown - kills ALL meco.py processes)."""
 
-    with open(PID_FILE, "r") as f:
-        pid = int(f.read().strip())
+    # 1. Kill ALL meco.py processes
+    killed_pids = []  # Keep track of killed PIDs to avoid double killing
+    server_process_found = False  # Flag to track if any server process (except this one) is found
+    
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            if proc.pid == os.getpid():
+                continue    # Skip the current process to avoid killing the off command itself
+            
+            if "meco.py" in " ".join(proc.cmdline()):
+                server_process_found = True
+                logger.info(f"Killing meco.py process (PID: {proc.pid})")
 
-    if not is_running(pid):
-        logger.warning("Server process not found. Removing stale PID file.")
+                # 1. SIGTERM (Polite Shutdown) first
+                os.kill(proc.pid, signal.SIGTERM)
+
+                # 2. Wait for Termination (with timeout)
+                timeout = 5  # seconds
+                for _ in range(timeout):
+                    if not psutil.pid_exists(proc.pid):
+                        break  # Process terminated
+                    time.sleep(1)
+                else:  # If the loop finishes without breaking (timeout)
+                # 3. SIGKILL (Forceful Kill)
+                    logger.warning(f"Process (PID: {proc.pid}) did not respond to SIGTERM. Sending SIGKILL.")
+                    os.kill(proc.pid, signal.SIGKILL)
+
+                killed_pids.append(proc.pid)  # Add PID to list of killed ones
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass  # Process might have already exited
+
+    # If no server processes (other than the current off command) are found, log that info.
+    if not server_process_found:
+        logger.info("All server-related processes are off.")
+
+    # 2. Remove PID file (if it exists – it might not if the server crashed)
+    try:
         os.remove(PID_FILE)
-        return
+        logger.info("PID file removed.")
+    except FileNotFoundError:
+        pass  # It's okay if the file wasn't there
 
-    logger.info(f"Turning OFF Meco server (PID: {pid})...")
-    os.kill(pid, signal.SIGTERM)
-    os.remove(PID_FILE)
-    logger.info("Meco server turned OFF.")
+    sys.exit(0)  # Exit after killing processes
 
 
 def start_resource_descriptor(filename=None, file_content=None, save_as=None):
@@ -198,6 +253,16 @@ def handle_command(args, parser, parser_dict):
         sys.exit(1)
 
 
+def signal_handler(sig, frame):
+    logger.info('You pressed Ctrl+C!')
+    try:
+        if os.path.exists(PID_FILE): # Remove the PID file if it exists
+            os.remove(PID_FILE)
+    except Exception as e:
+        logger.error(f"Error removing PID file: {e}")
+    sys.exit(0)  # Exit cleanly
+
+
 def main():
     """Main function to parse arguments and execute commands."""
     parser = create_parser()
@@ -211,6 +276,21 @@ def main():
     }
 
     handle_command(args, parser, parser_dict)
+    
+    if args.command == 'on': # Only start server if the command is 'on'
+        signal.signal(signal.SIGINT, signal_handler)  # Register the signal handler
+
+        try:
+            with open(PID_FILE, "w") as f:
+                f.write(str(os.getpid()))
+
+            server_on()  # Start the gRPC server
+
+        finally:
+            try:
+                os.remove(PID_FILE)  # Remove the PID file when the server is stopped
+            except FileNotFoundError:
+                pass
 
 
 if __name__ == "__main__":
