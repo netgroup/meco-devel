@@ -44,6 +44,33 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         response_msg = f"Hello from M-E-C-O! You said: {request.message}"
         return meco_pb2.MecoResponse(message=response_msg)
 
+    def validate_and_respond(self, content):
+        """Validates whether the input is a valid JSON."""
+        try:
+            json.loads(content)
+            return meco_pb2.StartResponse(success=True, message="Content syntax is valid.")
+        except json.JSONDecodeError:
+            return meco_pb2.StartResponse(success=False, message="Error: Invalid JSON syntax.")
+
+    def save_as_yaml(self, json_content, save_as):
+        """Saves JSON content as YAML file."""
+        try:
+            data = json.loads(json_content)
+            save_path = os.path.join(UPLOADS_DIR, f"{save_as}.yaml")
+            os.makedirs(UPLOADS_DIR, exist_ok=True) # Create directory if needed
+
+            with open(save_path, "w", encoding="utf-8") as f:
+                yaml.dump(data, f, default_flow_style=False)
+
+            logger.info(f"Saved JSON as YAML: {save_path}")
+            return meco_pb2.StartResponse(success=True, message=f"Saved as {save_path}")
+
+        except json.JSONDecodeError:
+            return meco_pb2.StartResponse(success=False, message="Error: Invalid JSON syntax.")
+        except Exception as e:
+            logger.error(f"Error saving file: {e}")
+            return meco_pb2.StartResponse(success=False, message=f"Error saving file: {e}")
+
     def Start(self, request, context):
         """Handles the Start RPC, processing file path or content."""
         try:
@@ -59,11 +86,23 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
                 with open(file_path, "r", encoding="utf-8") as f:
                     file_content = f.read()  # Read as string
-                logger.info(f"Successfully read file from path: {file_path}")
+                logger.info(f"Successfully read file from {file_path} with size of {len(file_content)} bytes")
 
+                if request.HasField("save_as"):
+                    response = self.save_as_yaml(file_content, request.save_as)
+                    if response.success:
+                        response = self.validate_and_respond(file_content)
+                        if response.success:
+                            logger.info(f"Processed data (first 50 characters): {file_content[:50]}...")
+                            return meco_pb2.StartResponse(success=True, message="File content processed and saved successfully.")
+                        else:
+                            return response
+                    else:
+                        return response
+                    
             elif request.HasField("file_content"):
                 file_content = request.file_content
-                logger.info("Start() received inline file content.")
+                logger.info(f"Successfully received {len(file_content)} bytes inline")
 
             else:
                 logger.error("Start() request missing both file_path and file_content.")
@@ -72,31 +111,40 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             if file_content is None: # Handle the case where no file content was received.
                 return meco_pb2.StartResponse(success=False, message="No file content to process.")
 
-            try:
-                # Attempt to parse as JSON first
-                data = json.loads(file_content)
-                logger.info("File parsed as JSON successfully.")
+            if request.HasField("save_as"):
+                if request.dry_run:
+                    response = self.validate_and_respond(file_content)
+                    if response.success:
+                        response = self.save_as_yaml(file_content, request.save_as)
+                        if response.success:
+                            return meco_pb2.StartResponse(success=True, message=f"File saved as {request.save_as}.yaml (dry run)")
+                        else:
+                            return response
+                    else:
+                        return response
+                else:
+                    response = self.save_as_yaml(file_content, request.save_as)
+                    if response.success:
+                        response = self.validate_and_respond(file_content)
+                        if response.success:
+                            logger.info(f"Processed data (first 50 characters): {file_content[:50]}...")
+                            return meco_pb2.StartResponse(success=True, message="File content processed and saved successfully.")
+                        else:
+                            return response
+                    else:
+                        return response
+            else:
+                response = self.validate_and_respond(file_content)
+                if response.success:
+                    if request.dry_run:
+                        return meco_pb2.StartResponse(success=True, message="File content validated (dry run).")
+                    else:
+                        logger.info(f"Processed data (first 50 characters): {file_content[:50]}...")
+                        return meco_pb2.StartResponse(success=True, message="File content processed successfully.")
+                else:
+                    return response
 
-                if request.HasField("save_as"):  # Only save if save_as is provided
-                    save_path = os.path.join(UPLOADS_DIR, request.save_as + ".yaml")  # Save as YAML
-                    os.makedirs(UPLOADS_DIR, exist_ok=True)
-                    with open(save_path, "w", encoding="utf-8") as f:
-                        yaml.dump(data, f)  # Dump as YAML
-                    logger.info(f"JSON data saved to: {save_path}")
-
-            except json.JSONDecodeError as e:  # Catch JSON errors
-                logger.error(f"Failed to parse file as JSON: {e}")
-                return meco_pb2.StartResponse(success=False, message=f"Invalid JSON format: {e}")
-            except Exception as e: # Catch other potential errors
-                logger.exception(f"An error occurred during file saving: {e}")
-                return meco_pb2.StartResponse(success=False, message=f"Error saving file: {e}")
-
-            # Process the loaded data here (e.g., validate, extract info, etc.)
-            logger.info(f"Processed data (first 50 characters): {str(data)[:50]}...")
-
-            return meco_pb2.StartResponse(success=True, message="File content processed and saved successfully.")
-
-        except Exception as e:  # Catch any other unexpected errors
+        except Exception as e:
             logger.exception(f"An unexpected error occurred: {e}")
             return meco_pb2.StartResponse(success=False, message=f"An unexpected error occurred: {e}")
 
@@ -238,7 +286,7 @@ def create_parser():
     start_parser = subparsers.add_parser("start", help="Send a resource descriptor file to the Meco server")
     start_parser.add_argument("filename", nargs="?", help="Path to the resource descriptor file")
     start_parser.add_argument("--content", help="Provide file content directly as a string")
-    start_parser.add_argument("--save-as", help="Filename to store the file on the server (if using content)")
+    start_parser.add_argument("--saveas", dest="save_as", help="Filename to store the file on the server (if using content)")
 
     return parser
 
