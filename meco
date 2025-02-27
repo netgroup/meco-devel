@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# This script is a wrapper for the meco.py script.
+# It activates the virtual environment and runs the Python script with all passed arguments.
+
+# make a symlink of this script to /usr/local/bin/meco using:
+#   sudo ln -s $HOME/meco-devel/meco.py /usr/local/bin/meco
+
+# or copy the script to /usr/local/bin using:
+#   sudo cp meco /usr/local/bin/
+
+# Check if the $HOME/meco-devel directory exists
+if [ ! -d "$HOME/meco-devel" ]; then
+    echo "Error: The folder $HOME/meco-devel does not exist."
+    echo "Please verify the directory path and ensure you are running this command as the correct user."
+    echo "If needed, switch to the appropriate user and try again."
+    exit 1
+fi
+
+# Check if the virtual environment's activate script exists
+if [ ! -f "$HOME/meco-devel/venv/bin/activate" ]; then
+    echo "Error: The virtual environment activation script ($HOME/meco-devel/venv/bin/activate) does not exist."
+    echo "Please ensure the virtual environment is properly set up in $HOME/meco-devel."
+    exit 1
+fi
+
+# Check if meco.py exists
+if [ ! -f "$HOME/meco-devel/meco.py" ]; then
+    echo "Error: The file $HOME/meco-devel/meco.py does not exist."
+    echo "Please verify that the meco.py script is located in $HOME/meco-devel."
+    exit 1
+fi
+
+# Navigate to the directory containing the script
+cd "$HOME/meco-devel"
+
+# Activate the virtual environment
+source venv/bin/activate
+
+# Run the Python script with all passed arguments
+python3 meco.py "$@"

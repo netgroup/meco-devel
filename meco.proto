@@ -23,11 +23,11 @@ message MecoResponse {
 // Message used by the Start RPC
 message ResourceDescriptor {
   oneof file_data {
-    string file_path = 1;    // The path to the file (if provided)
-    string file_content = 2; // The actual file content (if inline)
+    string server_file_path = 1;    // File that already exists on the server
+    string client_file_content = 2; // // File content sent from the client
   }
-  optional string save_as = 3; // Optional: If file_content is provided, store it as this filename on the server
-  optional bool dry_run = 4;   // If true, save the file but do not start processing
+  optional string save_as = 3; // Save on the server and start the testbed
+  optional bool dry_run = 4;   // Save file without starting the testbed
 }
 
 // Response from the Start RPC

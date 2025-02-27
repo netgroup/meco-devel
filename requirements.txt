@@ -1,0 +1,6 @@
+argcomplete==3.5.3
+grpcio==1.70.0
+grpcio-tools==1.70.0
+protobuf==5.29.3
+psutil==6.1.1
+PyYAML==6.0.2

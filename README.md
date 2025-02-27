@@ -1,240 +1,168 @@
-# meco
-MEga COnstellation emulator
+# MECO - MEga COnstellation Emulator
 
-Meco is a gRPC-based application that simulates and manages a Low Earth Orbit (LEO) Mega Constellation. It provides a command-line interface (CLI) to:
-- Start a background gRPC server (`on`)
-- Stop the server (`off`)
-- Send a resource descriptor file to the server (`start`)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-## Features
-- Manage a gRPC server via CLI
-- Supports daemonized execution
-- Implements structured logging using Python's logging module
-- Supports auto-completion with argcomplete
-- Uses gRPC for communication
+A scalable emulator for LEO mega constellation networks. Designed to support research, testing, and development of networking protocols and systems.
 
 ---
 
-## Installation
+## Key Features
 
-### Install Dependencies
-```bash
-pip install argcomplete grpcio grpcio-tools
-```
+- **Real-time gRPC API** (Port 50051)
+- **YAML Configuration** (Files/Inline/Nano Editor)
+- **Validation Engine** (Syntax + Semantic checks)
+- **Persistent Server Management** (PID tracking)
+- **Structured Logging** (Server & Client logs)
+- **CLI Auto-completion**
 
-### Enable CLI Auto-Completion
-For Bash users:
-```bash
-eval "$(register-python-argcomplete meco)"
-```
-For global auto-completion (one-time setup):
-```bash
-activate-global-python-argcomplete
-```
+---
 
-### Compile gRPC Protocol Buffers
-Ensure you have the `meco.proto` file and run:
+## Table of Contents
+
+1. [Installation](#installation)
+2. [Wrapper Setup](#wrapper-setup)
+3. [Quick Start](#quick-start)
+4. [Command Reference](#command-reference)
+5. [Troubleshooting](#troubleshooting)
+6. [Contributing](#contributing)
+7. [License](#license)
+
+---
+
+## Installation <a id="installation"></a>
+
+### Requirements
+
+- Python 3.8+
+- Virtual Environment (Recommended)
+
 ```bash
+git clone https://github.com/netgroup/meco-devel.git
+cd meco-devel
+python3 -m venv venv
+source venv/bin/activate  # Linux/macOS
+pip install -r requirements.txt
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
 ```
 
 ---
 
-## Usage
+## Wrapper Setup <a id="wrapper-setup"></a>
 
-### Start the gRPC Server (Daemon Mode)
+### Global Access Installation
+
 ```bash
-python meco.py on
+sudo ln -s $PWD/meco /usr/local/bin/meco
+sudo ln -s $PWD/client /usr/local/bin/client
+sudo chmod +x /usr/local/bin/meco /usr/local/bin/client
 ```
-Runs the server in the background and stores its PID in `/tmp/meco_server.pid`.
 
-### Stop the gRPC Server
-```bash
-python meco.py off
-```
-Stops the server by terminating the background process.
+### Verify Installation
 
-### Send a Resource Descriptor File
 ```bash
-python meco.py start config.json
-```
-Sends `config.json` to the gRPC server for processing.
-
-### Show Help Menu
-```bash
-python meco.py --help
+which meco client  # Should show /usr/local/bin paths
 ```
 
 ---
 
-## Example Commands
+## Quick Start <a id="quick-start"></a>
 
-#### Start the Server
+### Basic Workflow
+
 ```bash
-python meco.py on
-```
-Output:
-```
-2025-02-07 12:00:00 [INFO] Meco server turned ON in background (PID: 12345).
+# Start server
+meco on
+
+# Send local configuration
+client start --filepath satellite_network.yaml
+
+# Stop server
+meco off
 ```
 
-#### Stop the Server
+### Live Log Monitoring
+
 ```bash
-python meco.py off
-```
-Output:
-```
-2025-02-07 12:05:00 [INFO] Turning OFF Meco server (PID: 12345)...
-2025-02-07 12:05:01 [INFO] Meco server turned OFF.
-```
-
-#### Send a Resource File
-```bash
-python meco.py start my_config.json
-```
-If the file exists:
-```
-2025-02-07 12:10:00 [INFO] Successfully started with resource file: my_config.json
-```
-If the file is missing:
-```
-2025-02-07 12:10:05 [ERROR] Error: File 'my_config.json' does not exist.
-```
-
-#### Check Available Commands
-```bash
-python meco.py --help
-```
-Output:
-```
-usage: meco [-h] {on,off,start} ...
-
-Emulates a LEO Mega Constellation
-
-positional arguments:
-  {on,off,start}  Available commands
-    on            Turn the Meco gRPC server ON (daemon mode)
-    off           Turn the Meco gRPC server OFF
-    start         Send a resource descriptor file to the Meco server
-
-optional arguments:
-  -h, --help      show this help message and exit
+tail -f /tmp/meco_server.log  # Server logs
+tail -f /tmp/meco_client.log  # Client logs
 ```
 
 ---
 
-## Logging
+## Command Reference <a id="command-reference"></a>
 
-Meco uses Python's logging module for structured logs.
+### Server Management
 
-Log levels used:
-- INFO → General information (`logger.info()`)
-- WARNING → Server status (`logger.warning()`)
-- ERROR → Issues (`logger.error()`)
+| Command  | Description        | Example       |
+| -------- | ------------------ | ------------- |
+| `on`     | Start server       | `meco on`     |
+| `off`    | Stop server        | `meco off`    |
+| `status` | Show server status | `meco status` |
 
-### Example Logs
-```
-2025-02-07 12:00:00 [INFO] Meco server started on port 50051.
-2025-02-07 12:05:30 [INFO] Start() called with resource descriptor file: config.json
-2025-02-07 12:06:10 [ERROR] Error: File 'config.json' does not exist.
+### Client Operations
+
+| Flag         | Description          | Example                                          |
+| ------------ | -------------------- | ------------------------------------------------ |
+| `--filepath` | Upload local YAML    | `client start --filepath config.yaml`            |
+| `--filename` | Use server-side file | `client start --filename saved_config.yaml`      |
+| `--content`  | Direct YAML input    | `client start --content "nodes: [...]"`          |
+| `--saveas`   | Save configuration   | `client start --filepath cfg.yaml --saveas prod` |
+| `--dryrun`   | Validate only        | `client start --filepath cfg.yaml --dryrun`      |
+
+### Interactive Configuration
+
+```bash
+client start --content  # Opens Nano editor
 ```
 
 ---
 
-## Development Setup
+## Troubleshooting <a id="troubleshooting"></a>
 
-### 1. Clone the Repository
+### Common Issues
+
+**Server won't start:**
+
 ```bash
-git clone https://github.com/your-repo/meco.git
-cd meco
+# Force remove existing PID
+rm -f /tmp/meco_server.pid
+meco on
 ```
 
-### 2. Set Up a Python Virtual Environment
-It is recommended to use a virtual environment to isolate dependencies.  
+**Missing dependencies:**
 
-#### Create and Activate the Virtual Environment:
-For **Linux/macOS**:
 ```bash
+deactivate && rm -rf venv
 python3 -m venv venv
 source venv/bin/activate
-```
-
-For **Windows**:
-```powershell
-python -m venv venv
-venv\Scripts\activate
-```
-
-#### Install Dependencies:
-```bash
 pip install -r requirements.txt
 ```
 
-#### Verify Installation:
-```bash
-python -m grpc_tools.protoc --version
-```
+**gRPC connection issues:**
 
-### 3. Compile gRPC Stubs
 ```bash
-python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
-```
-
-### 4. Run the Server in Debug Mode
-```bash
-python meco.py on
-```
-
-### 5. Run the Client for Testing
-```bash
-python meco.py start test.json
-```
-
-### 6. Deactivate the Virtual Environment (When Done)
-```bash
-deactivate
+lsof -i :50051  # Check port availability
 ```
 
 ---
 
-## Troubleshooting
+## Contributing <a id="contributing"></a>
 
-### "server already running" message when running `python meco.py on`
-Check if the PID file exists:
-```bash
-cat /tmp/meco_server.pid
-```
-Manually stop the process:
-```bash
-kill -9 $(cat /tmp/meco_server.pid)
-rm /tmp/meco_server.pid
-```
+We welcome contributions! Please:
 
-### "File does not exist" error when running `python meco.py start file.json`
-Ensure the file exists:
-```bash
-ls -lh file.json
-```
+1. Fork the repository
+2. Create a feature branch
+3. Submit PR with tests
 
-### Command completion is not working
-Re-enable argcomplete:
-```bash
-eval "$(register-python-argcomplete meco)"
-```
+See [Development Workflow](Development.md) for detailed guidelines.
 
 ---
 
-## License
+## License <a id="license"></a>
 
-This project is licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.
-
----
-
-## Future Improvements
-- Add Docker support for containerized deployment
-- Add unit tests for CLI and gRPC services
+Licensed under [Apache 2.0](https://github.com/netgroup/meco-devel/blob/main/LICENSE).
 
 ---
 
-## Contributors
-- Stefano Salsano - Maintainer
+> **Maintainers**: Stefano Salsano, Max Miraftab  
+> **Support**: Open an issue on [GitHub](https://github.com/netgroup/meco-devel/issues)

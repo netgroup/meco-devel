@@ -1,88 +1,114 @@
+#!/usr/bin/env python
+
 import grpc
 import meco_pb2
 import meco_pb2_grpc
 import argparse
 import os
 import logging
+import subprocess
 
 # Configure logging for the client
 logging.basicConfig(
-    level=logging.INFO,  # Set logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()],  # Log to the console
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)  # Get a logger instance for this module
 
-def test_rpc_calls(command, filename=None, localfile=None, save_as=None, dry_run=False, content=None):
-    """Tests the Meco gRPC service."""
+def open_editor_for_content(filename="edited_content.yaml", keep_file=False):
+    """Opens nano for input, saves content in a cache file, and returns the content."""
+    cache_dir = "/tmp/meco_uploads/cache/"
+    os.makedirs(cache_dir, exist_ok=True)  # Ensure directory exists
+    file_path = os.path.join(cache_dir, filename)
+
+    # Create file if it doesn't exist
+    with open(file_path, "w") as f:
+        pass  # Just create an empty file
+
+    # Open Nano editor
+    subprocess.call([os.environ.get("EDITOR", "nano"), file_path])
+
+    # Read content after editing
+    with open(file_path, "r") as f:
+        content = f.read().strip()
+
+    if not content:
+        logger.warning("No content entered. Aborting operation.")
+        return None
+
+    if not keep_file:
+        os.remove(file_path)  # Remove only if not meant to be saved
+
+    return content
+
+
+def test_rpc_calls(
+    command, filename=None, localfile=None, saveas=None, dryrun=False, content=None
+):
+    """Tests the Meco gRPC service with file reference or inline content."""
     try:
         channel = grpc.insecure_channel("localhost:50051")  # Create a gRPC channel
         stub = meco_pb2_grpc.MecoServiceStub(channel)  # Create a stub for the service
 
-        if command == "start":
-            start_req = None  # Initialize the request variable
+        # Open editor and save content in a cache file when needed
+        keep_file = bool(saveas or dryrun)  # Keep file if using --saveas or --dryrun
+        if content == "":
+            logger.info("Opening Nano editor for content input...")
+            content = open_editor_for_content("edited_content.yaml", keep_file)
+            if not content:
+                logger.error("No valid input provided.")
+                return  # Abort if no content was provided
 
-            if filename is not None:
-                logger.info(f"Sending file path: {filename}")
-                start_req = meco_pb2.ResourceDescriptor(file_path=filename, save_as=save_as, dry_run=dry_run)
-            elif localfile is not None:
-                if not os.path.exists(localfile):
-                    logger.error(f"Error: File '{localfile}' does not exist.")
-                    return  # Exit the function if the file doesn't exist
+        if filename:
+            logger.info(f"Using server-side file: {filename}")
+            request = meco_pb2.ResourceDescriptor(
+                server_file_path=filename, save_as=saveas, dry_run=dryrun
+            )
 
-                try:
-                    with open(localfile, "r", encoding="utf-8") as f:
-                        file_content = f.read()
-                    logger.info(f"Sending local file content (first 50 chars): {file_content[:50]}...")
-                    start_req = meco_pb2.ResourceDescriptor(file_content=file_content, save_as=save_as, dry_run=dry_run)
-                except Exception as e: # Catch file reading errors
-                    logger.error(f"Error reading local file: {e}")
-                    return
-            elif content is not None:
-                logger.info(f"Sending inline content (first 50 chars): {content[:50]}...")
-                start_req = meco_pb2.ResourceDescriptor(file_content=content, save_as=save_as, dry_run=dry_run)
-            else:
-                logger.error("Error: Either filename or localfile must be provided for 'start' command.")
-                return  # Exit if no file info is given
+        elif content:
+            logger.info(f"Sending YAML content (first 50 chars): {content[:50]}...")
+            request = meco_pb2.ResourceDescriptor(
+                client_file_content=content, save_as=saveas, dry_run=dryrun
+            )
 
-            if start_req is None: # Exit if the request is still None
-                logger.error("Error: No request was created.")
-                return
-
-            try:  # Try making the gRPC call; handle connection errors
-                response = stub.Start(start_req)
-                if response.success:
-                    logger.info(f"Start({filename or localfile}) -> Success: {response.message}")
-                else:
-                    logger.error(f"Start({filename or localfile}) -> Error: {response.message}")
-
-            except grpc.RpcError as e:  # Catch gRPC errors (including connection failures)
-                logger.error(f"gRPC Error (likely server offline): {e}")
-                if e.code() == grpc.StatusCode.UNAVAILABLE: # Check if the server is unavailable
-                    logger.error("The server is likely offline or unreachable.")
-                return  # Exit the function after reporting the error
-            
         else:
-            logger.error("Invalid command. Use 'start'.")
+            logger.error("No valid input provided.")
+            return
 
-    except Exception as e:
-        logger.exception(f"Client-side Error: {e}")  # Handle other client-side errors
+        response = stub.Start(request)
+        logger.info(f"Response: {response.message}")
 
+    except grpc.RpcError as e:
+        logger.error(f"gRPC Error: {e}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test Meco gRPC Client with flexible file input")
+    parser = argparse.ArgumentParser(description="Meco YAML Client")
     parser.add_argument("command", choices=["start"], help="Command to execute")
 
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--filename", help="Filename on the remote server (required for file_path)")
-    group.add_argument("--filepath", dest="localfile", help="Read local file and send as content")
-    group.add_argument("--content", help="Provide file content directly as a string")
+    group.add_argument("--filename", help="Server-side file path (existing on server)")
+    group.add_argument(
+        "--filepath", dest="localfile", help="Read local file and send as content"
+    )
+    group.add_argument(
+        "--content",
+        nargs="?",
+        const="",
+        help="Provide file content directly as a string or open an editor if empty",
+    )
 
-    parser.add_argument("--save_as", help="Specify remote filename to save the file as")
-    parser.add_argument("--dry_run", action="store_true", help="If provided, the server will simulate saving the file but will not actually save it. Requires --save_as to be specified.")
+    parser.add_argument("--saveas", help="Specify remote filename to save the file as")
+    parser.add_argument(
+        "--dryrun", action="store_true", help="Validate without execution"
+    )
 
     args = parser.parse_args()
-
-    test_rpc_calls(args.command, filename=args.filename, localfile=args.localfile, save_as=args.save_as, dry_run=args.dry_run, content=args.content)
+    test_rpc_calls(
+        args.command,
+        filename=args.filename,
+        localfile=args.localfile,
+        saveas=args.saveas,
+        dryrun=args.dryrun,
+        content=args.content,
+    )
