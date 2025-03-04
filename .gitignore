@@ -1,6 +1,9 @@
 venv
-meco_client_env
-unittest.py
+MagicMock/
+.pytest_cache/
 __pycache__/
 *_pb2.py
 *_pb2_grpc.py
+meco_devel.egg-info/
+*.log
+/tmp/
