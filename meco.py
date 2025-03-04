@@ -88,6 +88,12 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                         success=False, message=f"File already exists: {save_path}"
                     )
 
+                save_result = self._save_yaml(file_content, save_path)
+                if not save_result.get("success", False):
+                    return meco_pb2.StartResponse(
+                        success=False, message=save_result.get("message", "Save failed")
+                    )
+
                 logger.info(f"Saving file to {save_path}")
                 self._save_yaml(file_content, save_path)
 
@@ -105,15 +111,17 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             )
 
     def _get_save_path(self, filename):
-        return os.path.join(UPLOADS_DIR, f"{filename}.yaml")
+        # Ensure filename ends with .yaml or .yml
+        if not filename.lower().endswith((".yaml", ".yml")):
+            filename += ".yaml"
+        return os.path.join(UPLOADS_DIR, filename)
 
     def _save_yaml(self, content, save_path):
-        """Saves YAML content to a file."""
+        """Saves YAML content to a file with proper error handling"""
         try:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             with open(save_path, "w") as f:
                 f.write(content)
-            logger.info(f"File saved successfully at {save_path}")
             return {"success": True}
         except Exception as e:
             logger.error(f"Failed to save file: {str(e)}")
@@ -234,37 +242,64 @@ def server_off():
     try:
         with open(PID_LIST_FILE, "r") as f:
             pids = [int(line.strip()) for line in f.readlines()]
-
-        for pid in pids:
-            if psutil.pid_exists(pid):
-                server_process_found = True
-                logger.info(f"Killing Meco server process (PID: {pid})")
-
-                # 1️⃣ SIGTERM (Graceful Shutdown)
-                os.kill(pid, signal.SIGTERM)
-
-                # 2️⃣ Wait for process to terminate
-                timeout = 5
-                for _ in range(timeout):
-                    if not psutil.pid_exists(pid):
-                        break
-                    time.sleep(1)
-                else:
-                    # 3️⃣ SIGKILL (Forceful Shutdown if still running)
-                    logger.warning(
-                        f"Process (PID: {pid}) did not terminate. Sending SIGKILL."
-                    )
-                    os.kill(pid, signal.SIGKILL)
-
-                killed_pids.append(pid)
-
-        # Remove stopped PIDs from the file
-        with open(PID_LIST_FILE, "w") as f:
-            remaining_pids = [str(pid) for pid in pids if pid not in killed_pids]
-            f.write("\n".join(remaining_pids) + "\n")
-
+    except FileNotFoundError:
+        logger.info("No recorded Meco server PIDs found.")
+        return
+    except ValueError:
+        logger.error("Error reading PID list file: Invalid PID format in file.")
+        return
     except Exception as e:
-        logger.exception(f"Error while stopping the server: {e}")
+        logger.error(f"Error reading PID list file: {e}")
+        return
+
+    for pid in pids:
+        if psutil.pid_exists(pid):
+            server_process_found = True
+            logger.info(f"Killing Meco server process (PID: {pid})")
+
+            try:
+                # 1. SIGTERM (Graceful Shutdown)
+                os.kill(pid, signal.SIGTERM)
+            except OSError as e:
+                logger.exception(f"Error sending SIGTERM: {e}")
+
+            # 2. Wait for process to terminate
+            timeout = 5
+            process_still_running = True
+            for _ in range(timeout):
+                if not psutil.pid_exists(pid):
+                    process_still_running = False
+                    break
+                time.sleep(1)
+
+            # 3. Send SIGKILL if process is still running
+            if process_still_running:
+                logger.warning(
+                    f"Process (PID: {pid}) did not terminate. Sending SIGKILL."
+                )
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError as e:
+                    logger.exception(f"Error sending SIGKILL: {e}")
+
+            killed_pids.append(pid)
+
+    # Rebuild PID list with remaining active PIDs
+    remaining_pids = []
+    for pid in pids:
+        if psutil.pid_exists(pid):
+            remaining_pids.append(str(pid))
+
+    # Write remaining PIDs to file or remove file if empty
+    if remaining_pids:
+        with open(PID_LIST_FILE, "w") as f:
+            f.write("\n".join(remaining_pids) + "\n")
+    else:
+        try:
+            os.remove(PID_LIST_FILE)
+            logger.info("PID list file removed.")
+        except FileNotFoundError:
+            pass
 
     if server_process_found:
         try:
@@ -349,21 +384,6 @@ def main():
     }
 
     handle_command(args, parser, parser_dict)
-
-    if args.command == "on":  # Only start server if the command is 'on'
-        signal.signal(signal.SIGINT, signal_handler)  # Register the signal handler
-
-        try:
-            with open(PID_FILE, "w") as f:
-                f.write(str(os.getpid()))
-
-            server_on()  # Start the gRPC server
-
-        finally:
-            try:
-                os.remove(PID_FILE)  # Remove the PID file when the server is stopped
-            except FileNotFoundError:
-                pass
 
 
 if __name__ == "__main__":
