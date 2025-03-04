@@ -15,9 +15,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def open_editor_for_content(filename="edited_content.yaml", keep_file=False):
+def open_editor_for_content(
+    filename="edited_content.yaml", keep_file=False, cache_dir_base="/tmp/meco_uploads"
+):
     """Opens nano for input, saves content in a cache file, and returns the content."""
-    cache_dir = "/tmp/meco_uploads/cache/"
+    cache_dir = os.path.join(cache_dir_base, "cache")
     os.makedirs(cache_dir, exist_ok=True)  # Ensure directory exists
     file_path = os.path.join(cache_dir, filename)
 
@@ -42,13 +44,19 @@ def open_editor_for_content(filename="edited_content.yaml", keep_file=False):
     return content
 
 
-def test_rpc_calls(
+def perform_rpc_call(  # Renamed from test_rpc_calls
     command, filename=None, localfile=None, saveas=None, dryrun=False, content=None
 ):
     """Tests the Meco gRPC service with file reference or inline content."""
     try:
         channel = grpc.insecure_channel("localhost:50051")  # Create a gRPC channel
         stub = meco_pb2_grpc.MecoServiceStub(channel)  # Create a stub for the service
+
+        # Handle localfile: Read content from local file
+        if localfile:
+            with open(localfile, "r") as f:
+                content = f.read()
+            logger.info(f"Read content from local file: {localfile}")
 
         # Open editor and save content in a cache file when needed
         keep_file = bool(saveas or dryrun)  # Keep file if using --saveas or --dryrun
@@ -104,7 +112,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    test_rpc_calls(
+    perform_rpc_call(
         args.command,
         filename=args.filename,
         localfile=args.localfile,
