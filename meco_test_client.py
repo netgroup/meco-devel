@@ -7,6 +7,7 @@ import argparse
 import os
 import logging
 import subprocess
+import sys
 
 # Configure logging for the client
 logging.basicConfig(
@@ -87,7 +88,11 @@ def perform_rpc_call(  # Renamed from test_rpc_calls
         logger.info(f"Response: {response.message}")
 
     except grpc.RpcError as e:
-        logger.error(f"gRPC Error: {e}")
+        if e.code() == grpc.StatusCode.UNAVAILABLE:
+            logger.error("Meco server is not running. Start it with 'meco on' first.")
+        else:
+            logger.error(f"gRPC Error: {e.details()}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
