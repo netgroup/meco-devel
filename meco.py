@@ -12,6 +12,7 @@ from concurrent import futures
 import yaml
 from yaml import YAMLError
 import psutil  # For process checking
+from jsonschema import validate, ValidationError
 
 import meco_pb2
 import meco_pb2_grpc
@@ -29,6 +30,12 @@ logger = logging.getLogger("meco")
 PID_FILE = "/tmp/meco_server.pid"  # Tracks server process
 UPLOADS_DIR = "/tmp/meco_uploads"  # Stores received files
 PID_LIST_FILE = "/tmp/meco_pids.txt"  # File to track active Meco PIDs
+SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.yaml")
+
+
+def load_schema():
+    with open(SCHEMA_PATH, "r") as f:
+        return yaml.safe_load(f)
 
 
 class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
@@ -74,10 +81,19 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 )
 
             # Validate YAML
-            validation_result = self._validate_yaml(file_content)
-            if not validation_result["success"]:
-                logger.error(f"YAML validation failed: {validation_result['message']}")
-                return meco_pb2.StartResponse(**validation_result)
+            try:
+                parsed_yaml = yaml.safe_load(file_content)
+                validation_result = self._validate_yaml(parsed_yaml)
+                if not validation_result["success"]:
+                    logger.error(f"Validation failed: {validation_result['message']}")
+                    return meco_pb2.StartResponse(
+                        success=False, message=validation_result["message"]
+                    )
+            except YAMLError as e:
+                logger.error(f"YAML parsing failed: {str(e)}")
+                return meco_pb2.StartResponse(
+                    success=False, message=f"YAML parsing failed: {str(e)}"
+                )
 
             # Handle save_as if requested
             if request.save_as:
@@ -87,15 +103,16 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     return meco_pb2.StartResponse(
                         success=False, message=f"File already exists: {save_path}"
                     )
-
-                save_result = self._save_yaml(file_content, save_path)
-                if not save_result.get("success", False):
-                    return meco_pb2.StartResponse(
-                        success=False, message=save_result.get("message", "Save failed")
-                    )
-
-                logger.info(f"Saving file to {save_path}")
                 self._save_yaml(file_content, save_path)
+
+            if not request.dry_run:
+                try:
+                    self._simulate_deployment(parsed_yaml)
+                except Exception as e:
+                    logger.error(f"Simulation failed: {str(e)}")
+                    return meco_pb2.StartResponse(
+                        success=False, message=f"Simulation failed: {str(e)}"
+                    )
 
             logger.info("Start() request processed successfully")
             return meco_pb2.StartResponse(
@@ -127,18 +144,22 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             logger.error(f"Failed to save file: {str(e)}")
             return {"success": False, "message": f"Save failed: {str(e)}"}
 
-    def _validate_yaml(self, content):
-        """Validates YAML syntax."""
+    def _validate_yaml(self, parsed_yaml):
         try:
-            parsed_yaml = yaml.safe_load(content)
-            if not isinstance(parsed_yaml, dict):
-                return {
-                    "success": False,
-                    "message": "Invalid YAML: Root must be a mapping (dictionary)",
-                }
+            schema = load_schema()
+            validate(instance=parsed_yaml, schema=schema)
             return {"success": True}
-        except yaml.YAMLError as e:
-            return {"success": False, "message": f"Invalid YAML: {str(e)}"}
+        except ValidationError as e:
+            # Extract simplified message
+            path = " → ".join(str(p) for p in e.path) if e.path else "root"
+            message = f"{path}: {e.message}"
+            return {"success": False, "message": f"Validation failed: {message}"}
+
+    def _simulate_deployment(self, data):
+        for node in data.get("nodes", []):
+            print(
+                f"Node with ID {node['id']}, named type {node['type']}, is simulated for deployment."
+            )
 
 
 def serve_forever():

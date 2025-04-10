@@ -1,0 +1,82 @@
+type: object
+required: [topology, node-types, nodes, visibility-constellation, visibility-ground]
+additionalProperties: true
+
+properties:
+  topology:
+    type: object
+    required: [orbital-plane, sat-orbital-plane]
+    properties:
+      orbital-plane: { type: integer }
+      sat-orbital-plane: { type: integer }
+
+  node-types:
+    type: array
+    items:
+      type: object
+      required: [type, properties]
+      additionalProperties: true
+      properties:
+        type: { type: string }
+        inherits: { type: string }
+        interfaces:
+          type: array
+          items:
+            type: object
+            required: [connects-to]
+            properties:
+              connects-to: { type: string }
+        properties:
+          type: object
+
+  nodes:
+    type: array
+    items:
+      type: object
+      required: [id, type]
+      additionalProperties: true
+      properties:
+        id: { type: integer }
+        type: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        altitude: { type: number }
+        orbital-plane: { type: integer }
+
+  visibility-constellation:
+    type: array
+    items:
+      type: object
+      required: [time, connection]
+      properties:
+        time: { type: integer }
+        connection:
+          type: array
+          items:
+            type: object
+            required: [source, destination, delay, loss, bandwidth]
+            properties:
+              source: { type: integer }
+              destination: { type: integer }
+              delay: { type: integer }
+              loss: { type: integer }
+              bandwidth: { type: integer }
+
+  visibility-ground:
+    type: array
+    items:
+      type: object
+      required: [time, connection]
+      properties:
+        time: { type: integer }
+        connection:
+          type: array
+          items:
+            type: object
+            required: [source, destination, delay, loss, bandwidth]
+            properties:
+              source: { type: integer }
+              destination: { type: integer }
+              delay: { type: integer }
+              loss: { type: integer }
+              bandwidth: { type: integer }

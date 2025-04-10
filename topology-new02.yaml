@@ -1,0 +1,206 @@
+topology:
+  orbital-plane: 2
+  sat-orbital-plane: 2
+
+node-types:
+  - type: Any
+    interfaces: []
+    properties:
+      image: "generic-node.img"
+
+  - type: Satellite
+    inherits: Any
+    interfaces:
+      - connects-to: Satellite
+      - connects-to: Satellite
+      - connects-to: Terminal
+      - connects-to: Gateway
+    properties:
+      image: "satellite.img"
+
+  - type: SatelliteBig
+    inherits: Satellite
+    properties:
+      max-terminals: 200
+      max-gateways: 4
+      image: "satellite-big.img"
+
+  - type: SatelliteSmall
+    inherits: Satellite
+    properties:
+      max-terminals: 30
+      max-gateways: 2
+      image: "satellite-small.img"
+
+  - type: Terminal
+    inherits: Any
+    interfaces:
+      - connects-to: Satellite
+    properties:
+      image: "terminal.img"
+
+  - type: Gateway
+    inherits: Any
+    interfaces:
+      - connects-to: Satellite
+      - connects-to: Router
+    properties:
+      image: "gateway.img"
+
+  - type: Router
+    inherits: Any
+    interfaces:
+      - connects-to: Gateway
+      - connects-to: Router
+    properties:
+      image: "router.img"
+
+nodes:
+  - id: 0
+    type: SatelliteBig
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 550000
+    orbital-plane: 0
+  - id: 1
+    type: SatelliteSmall
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 550000
+    orbital-plane: 0
+  - id: 2
+    type: SatelliteSmall
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 550000
+    orbital-plane: 1
+  - id: 3
+    type: SatelliteBig
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 550000
+    orbital-plane: 1
+  - id: 4
+    type: Terminal
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 0
+    orbital-plane: 0
+  - id: 5
+    type: Gateway
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 0
+    orbital-plane: 0
+  - id: 6
+    type: Router
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 0
+    orbital-plane: 0
+
+visibility-constellation:
+  - time: 0
+    connection:
+      - source: 0
+        destination: 1
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 1
+        destination: 2
+        delay: 30
+        loss: 0
+        bandwidth: 30
+      - source: 2
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+  - time: 10
+    connection:
+      - source: 0
+        destination: 1
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 1
+        destination: 2
+        delay: 30
+        loss: 0
+        bandwidth: 30
+      - source: 2
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+  - time: 20
+    connection:
+      - source: 0
+        destination: 1
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 1
+        destination: 2
+        delay: 30
+        loss: 0
+        bandwidth: 30
+      - source: 2
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+
+visibility-ground:
+  - time: 0
+    connection:
+      - source: 4
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 0
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 6
+        delay: 10
+        loss: 0
+        bandwidth: 100
+  - time: 10
+    connection:
+      - source: 4
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 0
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 6
+        delay: 10
+        loss: 0
+        bandwidth: 100
+  - time: 20
+    connection:
+      - source: 4
+        destination: 3
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 0
+        delay: 30
+        loss: 0
+        bandwidth: 40
+      - source: 5
+        destination: 6
+        delay: 10
+        loss: 0
+        bandwidth: 100
