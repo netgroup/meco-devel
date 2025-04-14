@@ -17,19 +17,42 @@ from jsonschema import validate, ValidationError
 import meco_pb2
 import meco_pb2_grpc
 
-# Configure logging
+# === Colored Log Setup with [Server-LEVEL] Format ===
+class LogColors:
+    RESET = "\033[0m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    CYAN = "\033[36m"
+    GRAY = "\033[90m"
+
+class ServerColorFormatter(logging.Formatter):
+    def format(self, record):
+        level_color = {
+            "DEBUG": LogColors.GRAY,
+            "INFO": LogColors.CYAN,
+            "WARNING": LogColors.YELLOW,
+            "ERROR": LogColors.RED,
+            "CRITICAL": LogColors.RED,
+        }.get(record.levelname, LogColors.RESET)
+
+        record.levelname = f"[Server-{record.levelname}]"
+        record.msg = f"{level_color}{record.msg}{LogColors.RESET}"
+        return super().format(record)
+
+handler = logging.StreamHandler()
+handler.setFormatter(ServerColorFormatter("%(levelname)s %(message)s"))
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-    ],
+    handlers=[handler],
 )
 logger = logging.getLogger("meco")
 
 PID_FILE = "/tmp/meco_server.pid"  # Tracks server process
 UPLOADS_DIR = "/tmp/meco_uploads"  # Stores received files
 PID_LIST_FILE = "/tmp/meco_pids.txt"  # File to track active Meco PIDs
+ACTIVITY_FLAG = "/tmp/meco_activity.flag"
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.yaml")
 
 
@@ -51,9 +74,11 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         """Handles Start requests with server_file_path or client_file_content."""
         try:
             file_content = None
+            save_filename = None
             # Get content from server file or client input
             if request.HasField("server_file_path"):
                 file_path = request.server_file_path
+                save_filename = os.path.basename(file_path)
                 logger.info(f"Start() received a file path: {file_path}")
 
                 if not os.path.exists(file_path):
@@ -70,6 +95,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
             elif request.HasField("client_file_content"):
                 file_content = request.client_file_content
+                save_filename = os.path.basename(save_path)
                 logger.info(
                     f"Received inline file content (first 50 chars): {file_content[:50]}..."
                 )
@@ -86,9 +112,12 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 validation_result = self._validate_yaml(parsed_yaml)
                 if not validation_result["success"]:
                     logger.error(f"Validation failed: {validation_result['message']}")
-                    return meco_pb2.StartResponse(
-                        success=False, message=validation_result["message"]
-                    )
+                    return meco_pb2.StartResponse(success=False, message=validation_result["message"])
+                else:
+                    if request.dry_run:
+                        logger.info("YAML validation successful (dry run).")
+                    else:
+                        logger.info("YAML validation successful, proceeding to deployment.")
             except YAMLError as e:
                 logger.error(f"YAML parsing failed: {str(e)}")
                 return meco_pb2.StartResponse(
@@ -105,9 +134,20 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     )
                 self._save_yaml(file_content, save_path)
 
+            if os.path.exists(ACTIVITY_FLAG) and not request.dry_run:
+                with open(ACTIVITY_FLAG, "r") as f:
+                    running_file = f.read().strip()
+                logger.warning(f"Emulation based on {running_file} is already running.")
+                return meco_pb2.StartResponse(
+                    success=False,
+                    message=f"Emulation based on \"{running_file}\" is running. Please shut it down before starting a new one."
+                )
+
             if not request.dry_run:
                 try:
                     self._simulate_deployment(parsed_yaml)
+                    with open(ACTIVITY_FLAG, "w") as f:
+                        f.write(save_filename)
                 except Exception as e:
                     logger.error(f"Simulation failed: {str(e)}")
                     return meco_pb2.StartResponse(
@@ -126,6 +166,16 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return meco_pb2.StartResponse(
                 success=False, message=f"Server error: {str(e)}"
             )
+
+    def Shutdown(self, request, context):
+        if os.path.exists(ACTIVITY_FLAG):
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Emulation shut down successfully.")
+            return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
+        else:
+            logger.warning("No emulation was running.")
+            return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
+
 
     def _get_save_path(self, filename):
         # Ensure filename ends with .yaml or .yml
@@ -158,8 +208,18 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
     def _simulate_deployment(self, data):
         for node in data.get("nodes", []):
             print(
-                f"Node with ID {node['id']}, named type {node['type']}, is simulated for deployment."
+                f" {node['type']} with ID {node['id']}, is simulated for deployment."
             )
+        with open(ACTIVITY_FLAG, "w") as f:
+            f.write("active")
+    def Shutdown(self, request, context):
+        if os.path.exists(ACTIVITY_FLAG):
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Emulation shut down successfully.")
+            return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
+        else:
+            logger.warning("No emulation was running.")
+            return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
 
 
 def serve_forever():
@@ -206,10 +266,17 @@ def server_status():
                 logger.error(f"Error checking PID {pid}: {e}")
         if running_pids:
             logger.info(
-                f"Meco server is running with the following process(es): {running_pids}"
+                f"Meco server is running with the following process: {running_pids}"
             )
+            try:
+                with open(ACTIVITY_FLAG, "r") as f:
+                    running_file = f.read().strip()
+                logger.info(f"Emulation based on {running_file} is running")
+            except FileNotFoundError:
+                logger.info("Server is idle (no deployments running)")
         else:
             logger.info("Meco server is not running.")
+
     except Exception as e:
         logger.error(f"Error reading PID list file: {e}")
 
@@ -325,6 +392,9 @@ def server_off():
     if server_process_found:
         try:
             os.remove(PID_FILE)
+            if os.path.exists(ACTIVITY_FLAG):
+                os.remove(ACTIVITY_FLAG)
+                logger.info("Activity flag cleared.")
             logger.info("PID file removed.")
         except FileNotFoundError:
             logger.info("No PID file found to remove.")

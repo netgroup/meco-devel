@@ -12,7 +12,6 @@ node-types:
     inherits: Any
     interfaces:
       - connects-to: Satellite
-      - connects-to: Satellite
       - connects-to: Terminal
       - connects-to: Gateway
     properties:
@@ -62,6 +61,14 @@ nodes:
     longitude: 100.0
     altitude: 550000
     orbital-plane: 0
+    interfaces: 
+      - id: 0
+        type: to_satellite
+      - id : 1
+        type: to_gateway
+      - id: 2
+        type: to_router
+
   - id: 1
     type: SatelliteSmall
     latitude: 40.5
@@ -102,8 +109,8 @@ nodes:
 visibility-constellation:
   - time: 0
     connection:
-      - source: 0
-        destination: 1
+      - source: 0.0
+        destination: 1.0
         delay: 30
         loss: 0
         bandwidth: 40

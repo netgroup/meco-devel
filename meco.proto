@@ -1,14 +1,18 @@
 syntax = "proto3";
 
 package meco;
+import "google/protobuf/empty.proto";
 
 // Define the gRPC service
 service MecoService {
+  // Start processing and Emulation (Supporting either a filename or inline file content)
+  rpc Start (ResourceDescriptor) returns (StartResponse);
+
   // Existing RPC
   rpc MecoCall (MecoRequest) returns (MecoResponse);
 
-  // Updated RPC: Start now supports both a filename and inline file content
-  rpc Start (ResourceDescriptor) returns (StartResponse);
+  // Shutdown an ongoing emulation
+  rpc Shutdown(google.protobuf.Empty) returns (ShutdownResponse);
 }
 
 // Messages for MecoCall
@@ -32,6 +36,11 @@ message ResourceDescriptor {
 
 // Response from the Start RPC
 message StartResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ShutdownResponse {
   bool success = 1;
   string message = 2;
 }
