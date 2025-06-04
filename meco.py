@@ -10,9 +10,12 @@ import logging
 import grpc
 from concurrent import futures
 import yaml
+import uuid
+import subprocess
 from yaml import YAMLError
 import psutil  # For process checking
 from jsonschema import validate, ValidationError
+import json
 
 import meco_pb2
 import meco_pb2_grpc
@@ -69,6 +72,13 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         response_msg = f"Hello from M-E-C-O! You said: {request.message}"
         logger.info(f"Sending response: {response_msg}")
         return meco_pb2.MecoResponse(message=response_msg)
+
+    def _check_incus(self):
+        try:
+            subprocess.run(["incus", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return False
 
     def Start(self, request, context):
         """Handles Start requests with server_file_path or client_file_content."""
@@ -144,14 +154,20 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 )
 
             if not request.dry_run:
+                if not self._check_incus():
+                    logger.error("'incus' not found. Please install Incus first.")
+                    return meco_pb2.StartResponse(
+                        success=False,
+                        message="Incus not found. Please install Incus before deploying."
+                    )
                 try:
-                    self._simulate_deployment(parsed_yaml)
+                    self._emulate_deployment(parsed_yaml)
                     with open(ACTIVITY_FLAG, "w") as f:
                         f.write(save_filename)
                 except Exception as e:
-                    logger.error(f"Simulation failed: {str(e)}")
+                    logger.error(f"Emulation failed: {str(e)}")
                     return meco_pb2.StartResponse(
-                        success=False, message=f"Simulation failed: {str(e)}"
+                        success=False, message=f"Emulation failed: {str(e)}"
                     )
 
             logger.info("Start() request processed successfully")
@@ -205,13 +221,58 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             message = f"{path}: {e.message}"
             return {"success": False, "message": f"Validation failed: {message}"}
 
-    def _simulate_deployment(self, data):
-        for node in data.get("nodes", []):
-            print(
-                f" {node['type']} with ID {node['id']}, is simulated for deployment."
-            )
-        with open(ACTIVITY_FLAG, "w") as f:
-            f.write("active")
+    def _emulate_deployment(self, data):
+        for node in data["nodes"]:
+            container_name, config_yaml = self._generate_incus_config(node)
+            self._create_container(container_name, config_yaml)
+
+    def _generate_incus_config(self, node):
+        instance_uuid = str(uuid.uuid4())
+        container_name = f"{node['id']}-{node['type']}"
+
+        config = {
+            "architecture": "x86_64",
+            "config": {
+                "image.architecture": "amd64",
+                "image.os": "Ubuntu",
+                "image.release": "focal",
+                "volatile.cloud-init.instance-id": instance_uuid,
+                "volatile.uuid": instance_uuid
+            },
+            "devices": {
+                "eth0": {
+                    "name": "eth0",
+                    "network": "incusbr0",
+                    "type": "nic"
+                },
+                "root": {
+                    "path": "/",
+                    "pool": "default",
+                    "type": "disk"
+                }
+            },
+            "ephemeral": False,
+            "profiles": ["default"],
+            "stateful": False,
+            "description": f"Container for {container_name}"
+        }
+
+        return container_name, yaml.dump(config, default_flow_style=False)
+
+    def _container_exists(self, name):
+        result = subprocess.run(["incus", "list", "--format=json"], capture_output=True, text=True)
+        return name in result.stdout
+
+    def _create_container(self, name, config_yaml):
+        if self._container_exists(name):
+            logger.info(f"Container {name} already exists. Skipping creation.")
+            return
+
+        logger.info(f"Creating container: {name}")
+        subprocess.run(["incus", "launch", "images:ubuntu/20.04", name, "--storage", "default", "--config", f"user.user-data=@/tmp/{name}.yaml"], check=True)
+
+        logger.info(f"Container {name} is ready.")
+        
     def Shutdown(self, request, context):
         if os.path.exists(ACTIVITY_FLAG):
             os.remove(ACTIVITY_FLAG)
@@ -272,6 +333,13 @@ def server_status():
                 with open(ACTIVITY_FLAG, "r") as f:
                     running_file = f.read().strip()
                 logger.info(f"Emulation based on {running_file} is running")
+                result = subprocess.run(
+                    ["incus", "list", "--format=json"],
+                    capture_output=True, text=True, check=True
+                )
+                names = [c["name"] for c in json.loads(result.stdout)]
+                logger.info(f"Active containers: {names}")
+
             except FileNotFoundError:
                 logger.info("Server is idle (no deployments running)")
         else:
