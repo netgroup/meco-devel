@@ -3,11 +3,13 @@
 import grpc
 import meco_pb2
 import meco_pb2_grpc
+import yaml
 import argparse
 import os
 import logging
 import subprocess
 import sys
+import json
 from google.protobuf.empty_pb2 import Empty
 
 
@@ -74,6 +76,58 @@ def open_editor_for_content(
     return content
 
 
+def get_running_containers():
+    """Get list of running containers from incus in JSON format."""
+    try:
+        result = subprocess.run(
+            ["incus", "list", "--format=json"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error listing containers: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing incus output: {e}")
+        return []
+
+def is_meco_container(name):
+    """Check if container name matches MECO container pattern (id-type)."""
+    try:
+        # Split name into id and type parts
+        parts = name.split('-')
+        if len(parts) != 2:
+            return False
+            
+        # Check if id part is a number and type is a valid node type
+        node_id, node_type = parts
+        if not node_id.isdigit():
+            return False
+            
+        # List of valid node types from our schema
+        valid_types = ['SatelliteBig', 'SatelliteSmall', 'Terminal', 'Gateway', 'Router']
+        return node_type in valid_types
+    except:
+        return False
+
+def delete_container(name):
+    """Delete a container with proper error handling."""
+    try:
+        logger.info(f"Deleting container: {name}")
+        subprocess.run(
+            ["incus", "delete", name, "--force"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to delete container {name}: {e}")
+        return False
+
+
 def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun=False, content=None):
     """Tests the Meco gRPC service with file reference or inline content."""
     try:
@@ -112,20 +166,36 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
             response = stub.Start(request)
             
             msg = response.message.lower()
-            if "running" in msg:
-                logger.warning(f"{response.message}")
-            elif "successful" in msg:
+            
+            if "incus not found" in msg or "install incus" in msg:
+                logger.error("Deployment failed: Incus is not installed on the server. Please install Incus (e.g. `sudo apt install incus`) and try again.")
+            elif "running" in msg:
+                # e.g. “Emulation based on X is running…”
+                logger.warning(msg)
+            elif "processing successful" in msg:
                 if "dry run" in msg:
-                    logger.info("YAML was valid and passed dry run validation.")
+                    logger.info("Dry run passed: YAML is valid.")
                 else:
-                    logger.info("YAML was valid and deployment started.")
+                    logger.info("Deployment started successfully on Incus.")
             else:
-                logger.warning("YAML was rejected or not accepted by the server.")
-
+                # Any other error message from the server
+                logger.error(f"Deployment failed: {msg}")
+                
         elif command == "shutdown":
             response = stub.Shutdown(Empty())
             if response.success:
                 logger.info(response.message)
+                try:
+                    # Get list of running containers in JSON format
+                    containers = get_running_containers()
+                    
+                    # Delete containers that match our naming pattern (id-type)
+                    for container in containers:
+                        name = container.get("name", "")
+                        if is_meco_container(name):
+                            delete_container(name)
+                except Exception as e:
+                    logger.error(f"Error during container cleanup: {e}")
             else:
                 logger.warning(response.message)
 
