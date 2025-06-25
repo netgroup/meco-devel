@@ -76,46 +76,32 @@ def open_editor_for_content(
     return content
 
 
-def get_running_containers():
-    """Get list of running containers from incus in JSON format."""
+def get_running_instances():
+    """Get list of running instances from incus in JSON format."""
     try:
         result = subprocess.run(
             ["incus", "list", "--format=json"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
-        return json.loads(result.stdout)
+        all = json.loads(result.stdout)
+        return [
+            inst for inst in all 
+            if inst.get("config", {}).get("user.meco") == "true"
+        ]
     except subprocess.CalledProcessError as e:
-        logger.error(f"Error listing containers: {e}")
+        logger.error(f"Error listing instances: {e}")
         return []
     except json.JSONDecodeError as e:
         logger.error(f"Error parsing incus output: {e}")
         return []
 
-def is_meco_container(name):
-    """Check if container name matches MECO container pattern (id-type)."""
-    try:
-        # Split name into id and type parts
-        parts = name.split('-')
-        if len(parts) != 2:
-            return False
-            
-        # Check if id part is a number and type is a valid node type
-        node_id, node_type = parts
-        if not node_id.isdigit():
-            return False
-            
-        # List of valid node types from our schema
-        valid_types = ['SatelliteBig', 'SatelliteSmall', 'Terminal', 'Gateway', 'Router']
-        return node_type in valid_types
-    except:
-        return False
 
-def delete_container(name):
-    """Delete a container with proper error handling."""
+def delete_instance(name):
+    """Delete an instance with proper error handling."""
     try:
-        logger.info(f"Deleting container: {name}")
+        logger.info(f"Deleting instance: {name}")
         subprocess.run(
             ["incus", "delete", name, "--force"],
             check=True,
@@ -124,7 +110,7 @@ def delete_container(name):
         )
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to delete container {name}: {e}")
+        logger.error(f"Failed to delete instance {name}: {e}")
         return False
 
 
@@ -186,16 +172,11 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
             if response.success:
                 logger.info(response.message)
                 try:
-                    # Get list of running containers in JSON format
-                    containers = get_running_containers()
-                    
-                    # Delete containers that match our naming pattern (id-type)
-                    for container in containers:
-                        name = container.get("name", "")
-                        if is_meco_container(name):
-                            delete_container(name)
+                    # Get MECO-tagged instances and delete them
+                    for inst in get_running_instances():
+                        delete_instance(inst["name"])
                 except Exception as e:
-                    logger.error(f"Error during container cleanup: {e}")
+                    logger.error(f"Error during instance cleanup: {e}")
             else:
                 logger.warning(response.message)
 
@@ -205,7 +186,6 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
         else:
             logger.error(f"gRPC Error: {e.details()}")
         sys.exit(1)
-
 
 
 if __name__ == "__main__":
