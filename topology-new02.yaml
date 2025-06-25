@@ -54,6 +54,14 @@ node-types:
     properties:
       image: "router.img"
 
+  - type: NetworkOrchestrator
+    inherits: Any
+    interfaces:
+      - connects-to: Gateway
+      - connects-to: Router
+    properties:
+      image: "orchestrator.img"
+
 nodes:
   - id: 0
     type: SatelliteBig
@@ -108,6 +116,17 @@ nodes:
     longitude: 100.0
     altitude: 0
     orbital-plane: 0
+  - id: 7
+    type: NetworkOrchestrator
+    latitude: 40.5
+    longitude: 100.0
+    altitude: 0
+    orbital-plane: 0
+    interfaces:
+      - id: 0
+        type: to_gateways
+      - id: 1
+        type: to_routers
 
 visibility-constellation:
   - time: 0
