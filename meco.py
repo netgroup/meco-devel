@@ -85,7 +85,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         try:
             file_content = None
             save_filename = None
-            # Get content from server file or client input
+            # 1. Load file content
             if request.HasField("server_file_path"):
                 file_path = request.server_file_path
                 save_filename = os.path.basename(file_path)
@@ -116,7 +116,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     success=False, message="No valid input provided"
                 )
 
-            # Validate YAML
+            # 2. Validate YAML
             try:
                 parsed_yaml = yaml.safe_load(file_content)
                 validation_result = self._validate_yaml(parsed_yaml)
@@ -134,7 +134,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     success=False, message=f"YAML parsing failed: {str(e)}"
                 )
 
-            # Handle save_as if requested
+            # 3. Handle save_as if requested
             if request.save_as:
                 save_path = self._get_save_path(request.save_as)
                 if os.path.exists(save_path):
@@ -144,6 +144,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     )
                 self._save_yaml(file_content, save_path)
 
+            # 4. Check for running emulation to prevent concurrent runs
             if os.path.exists(ACTIVITY_FLAG) and not request.dry_run:
                 with open(ACTIVITY_FLAG, "r") as f:
                     running_file = f.read().strip()
@@ -153,7 +154,9 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     message=f"Emulation based on \"{running_file}\" is running. Please shut it down before starting a new one."
                 )
 
+            # 5. Check for dry_run
             if not request.dry_run:
+                # 6. Check if 'incus' is installed
                 if not self._check_incus():
                     logger.error("'incus' not found. Please install Incus first.")
                     return meco_pb2.StartResponse(
@@ -222,13 +225,25 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return {"success": False, "message": f"Validation failed: {message}"}
 
     def _emulate_deployment(self, data):
-        for node in data["nodes"]:
-            container_name, config_yaml = self._generate_incus_config(node)
-            self._create_container(container_name, config_yaml)
+        for node in data.get("nodes", []):
+            name, config_yaml = self._generate_incus_config(node)
+            ntype = node.get("type", "").lower()
+            # app containers: all satellites & terminals
+            if ntype == "terminal" or ntype.startswith("satellite"):
+                self._create_container(name, config_yaml)
+            # system containers: routers & gateways
+            elif ntype in ("router", "gateway"):
+                self._create_container(name, config_yaml)
+            # full VMs: network orchestrator
+            elif ntype == "networkorchestrator":
+                self._create_vm(name, config_yaml)
+            # fallback
+            else:
+                self._create_container(name, config_yaml)
 
     def _generate_incus_config(self, node):
         instance_uuid = str(uuid.uuid4())
-        container_name = f"{node['id']}-{node['type']}"
+        instance_name = f"{node['id']}-{node['type']}"
 
         config = {
             "architecture": "x86_64",
@@ -254,24 +269,40 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             "ephemeral": False,
             "profiles": ["default"],
             "stateful": False,
-            "description": f"Container for {container_name}"
+            "description": f"Container for {instance_name}"
         }
 
-        return container_name, yaml.dump(config, default_flow_style=False)
+        return instance_name, yaml.dump(config, default_flow_style=False)
 
-    def _container_exists(self, name):
+    def _instance_exists(self, name):
         result = subprocess.run(["incus", "list", "--format=json"], capture_output=True, text=True)
         return name in result.stdout
 
     def _create_container(self, name, config_yaml):
-        if self._container_exists(name):
+        if self._instance_exists(name):
             logger.info(f"Container {name} already exists. Skipping creation.")
             return
-
         logger.info(f"Creating container: {name}")
-        subprocess.run(["incus", "launch", "images:ubuntu/20.04", name, "--storage", "default", "--config", f"user.user-data=@/tmp/{name}.yaml"], check=True)
-
+        subprocess.run([
+             "incus", "launch", "images:ubuntu/20.04", name,
+             "--storage", "default",
+             "--config", f"user.user-data=@/tmp/{name}.yaml",
+             "--config", "user.meco=true"
+         ], check=True)
         logger.info(f"Container {name} is ready.")
+
+    def _create_vm(self, name, config_yaml):
+        if self._instance_exists(name):
+            logger.info(f"VM {name} already exists. Skipping creation.")
+            return
+        logger.info(f"Creating VM: {name}")
+        subprocess.run([
+            "incus", "launch", "--vm", "images:ubuntu/20.04", name,
+            "--storage", "default",
+            "--config", f"user.user-data=@/tmp/{name}.yaml",
+            "--config", "user.meco=true"
+        ], check=True)
+        logger.info(f"VM {name} is ready.")
         
     def Shutdown(self, request, context):
         if os.path.exists(ACTIVITY_FLAG):
@@ -384,9 +415,36 @@ def server_on():
     serve_forever()
 
 
-def server_off():
+def server_off(force=False):
     """Turns the server OFF by stopping only the recorded PIDs in the list."""
     logger.info("Stopping Meco server processes...")
+
+    # If an emulation is active, require --force or bail out
+    if os.path.exists(ACTIVITY_FLAG):
+        if not force:
+            logger.warning(
+                "Active emulation detected. Please run 'client shutdown' first "
+                "or retry with 'meco off --force' to force teardown."
+            )
+            return
+        logger.info("Force flag set: tearing down active emulation first.")
+        # teardown logic (delete MECO instances)...
+        try:
+            out = subprocess.run(
+                ["incus", "list", "--format=json"],
+                capture_output=True, text=True, check=True
+            ).stdout
+            for inst in json.loads(out):
+                name = inst.get("name", "")
+                parts = name.split("-", 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    logger.info(f"Deleting instance: {name}")
+                    subprocess.run(["incus", "delete", name, "--force"], check=True)
+        except Exception as e:
+            logger.error(f"Error cleaning up emulation instances: {e}")
+        finally:
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Activity flag cleared.")
 
     if not os.path.exists(PID_LIST_FILE):
         logger.info("No recorded Meco server PIDs found.")
@@ -504,7 +562,12 @@ def create_parser():
     subparsers = parser.add_subparsers(dest="command", required=True, help="Commands")
 
     subparsers.add_parser("on", help="Turn the Meco server ON")
-    subparsers.add_parser("off", help="Turn the Meco server OFF")
+    off_parser = subparsers.add_parser("off", help="Turn the Meco server OFF")
+    off_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force teardown of active emulation before stopping the server"
+    )
     subparsers.add_parser("status", help="Show server status")
 
     return parser
@@ -538,7 +601,7 @@ def main():
 
     parser_dict = {
         "on": lambda _: server_on(),
-        "off": lambda _: server_off(),
+        "off": lambda _: server_off(force=args.force),
         "status": lambda _: server_status(),
     }
 
