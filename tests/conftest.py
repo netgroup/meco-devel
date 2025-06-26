@@ -20,3 +20,5 @@ def tmp_uploads_dir(tmp_path):
     import meco
     meco.UPLOADS_DIR = str(tmp_path / "uploads")
     return meco.UPLOADS_DIR
+
+# All fixtures are current and match the updated codebase. If you rename or remove arguments in your service/client, update these fixtures accordingly.
