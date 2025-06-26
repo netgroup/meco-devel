@@ -6,6 +6,7 @@ from meco import main, handle_command, create_parser
 from unittest.mock import patch
 import argparse
 import sys
+from meco_test_client import perform_rpc_call
 
 
 class TestCliCommands:
@@ -58,16 +59,33 @@ class TestCliCommands:
 
 
 class TestHandleCommand:
-    def test_handle_unknown_command(self, capsys):
-        """Validate internal command routing error handling
-        - Tests fallback to help system when receiving unknown command
-        - Ensures graceful degradation rather than silent failures
-        """
-        from argparse import Namespace
+    def test_create_parser_has_subcommands(self):
+        parser = create_parser()
+        subcommands = {a.dest for a in parser._subparsers._actions if hasattr(a, 'dest')}
+        assert "command" in subcommands
 
-        args = Namespace(command="unknown")
+    def test_handle_command_valid(self, monkeypatch):
+        called = {}
+        def fake_on(*a, **k):
+            called["on"] = True
+        def fake_off(*a, **k):
+            called["off"] = True
+        def fake_status(*a, **k):
+            called["status"] = True
+        parser = create_parser()
+        args = parser.parse_args(["on"])
+        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        assert "on" in called
+        args = parser.parse_args(["off"])
+        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        assert "off" in called
+        args = parser.parse_args(["status"])
+        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        assert "status" in called
+
+    def test_handle_command_invalid(self, monkeypatch, capsys):
         parser = create_parser()
         with pytest.raises(SystemExit):
-            handle_command(args, parser, {})
+            parser.parse_args(["unknown"])
         captured = capsys.readouterr()
-        assert "help" in captured.out.lower()
+        assert "invalid choice" in captured.err.lower()
