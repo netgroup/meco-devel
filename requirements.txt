@@ -5,5 +5,4 @@ protobuf==6.31.1
 psutil==6.1.1
 pytest==8.4.1
 PyYAML==6.0.2
-PyYAML==6.0.2
 setuptools==80.4.0
