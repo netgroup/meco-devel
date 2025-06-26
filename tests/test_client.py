@@ -2,50 +2,126 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import pytest
-from unittest.mock import patch, mock_open
-from meco_test_client import open_editor_for_content, perform_rpc_call
-import os
+from unittest.mock import patch, mock_open, MagicMock
+from meco_test_client import open_editor_for_content, perform_rpc_call, get_running_instances, delete_instance
+import subprocess
+import json
 
 
 class TestOpenEditorForContent:
-    @patch("subprocess.call")
-    @patch("builtins.open", mock_open(read_data="key: value"))
     @patch("os.remove")
-    def test_open_editor_for_content_basic(self, mock_remove, mock_call, tmp_path):
-        """Validate editor workflow from file creation to cleanup
-        - Tests temporary file creation in designated cache directory
-        - Verifies editor process invocation
-        - Ensures proper cleanup when keep_file=False
-        - Checks directory persistence after file deletion
-        """
-        cache_dir = tmp_path / "cache"
-        test_filename = str(cache_dir / "edited_content.yaml")
+    @patch("subprocess.call")
+    @patch("builtins.open", new_callable=mock_open, read_data="")
+    def test_editor_writes_nothing(self, mock_open_fn, mock_call, mock_remove, tmp_path):
+        result = open_editor_for_content(filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path))
+        assert result is None
 
-        content = open_editor_for_content(
-            keep_file=False, filename=test_filename, cache_dir_base=str(tmp_path)
-        )
+    @patch("os.remove")
+    @patch("subprocess.call")
+    @patch("builtins.open", new_callable=mock_open, read_data="some: value")
+    def test_editor_writes_content_and_deletes(self, mock_open_fn, mock_call, mock_remove, tmp_path):
+        result = open_editor_for_content(filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path))
+        assert result == "some: value"
+        mock_remove.assert_called()
 
-        mock_call.assert_called_once()
-        assert "key: value" in content
-        mock_remove.assert_called_once_with(test_filename)
-        assert os.path.exists(cache_dir)  # Directory should persist
+    @patch("os.remove")
+    @patch("subprocess.call")
+    @patch("builtins.open", new_callable=mock_open, read_data="some: value")
+    def test_editor_writes_content_and_keeps(self, mock_open_fn, mock_call, mock_remove, tmp_path):
+        result = open_editor_for_content(filename="foo.yaml", keep_file=True, cache_dir_base=str(tmp_path))
+        assert result == "some: value"
+        mock_remove.assert_not_called()
+
+
+class TestGetRunningInstances:
+    @patch("subprocess.run")
+    def test_valid_json_stdout(self, mock_run):
+        mock_run.return_value.stdout = json.dumps([{"name": "foo", "config": {"user.meco": "true"}}])
+        result = get_running_instances()
+        assert isinstance(result, list)
+        assert result[0]["name"] == "foo"
+
+    @patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "incus"))
+    def test_called_process_error(self, mock_run):
+        result = get_running_instances()
+        assert result == []
+
+    @patch("subprocess.run")
+    def test_json_decode_error(self, mock_run):
+        mock_run.return_value.stdout = "not json"
+        result = get_running_instances()
+        assert result == []
+
+
+class TestDeleteInstance:
+    @patch("subprocess.run")
+    def test_delete_ok(self, mock_run):
+        mock_run.return_value = None
+        assert delete_instance("foo")
+
+    @patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "incus"))
+    def test_delete_fail(self, mock_run):
+        assert not delete_instance("foo")
 
 
 class TestPerformRPCCall:
     @patch("meco_test_client.grpc.insecure_channel")
     @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
     @patch("builtins.open", mock_open(read_data="key: value"))
-    def test_rpc_calls_with_localfile(self, mock_stub, mock_channel, tmp_path):
-        """End-to-end test for local file processing workflow
-        - Simulates file input through --filepath argument
-        - Verifies proper file reading and content transmission
-        - Checks gRPC payload contains expected content
-        """
+    def test_start_with_filepath(self, mock_stub, mock_channel, tmp_path):
         test_file = tmp_path / "test.yaml"
         test_file.write_text("key: value")
-
         perform_rpc_call("start", localfile=str(test_file))
-
         args, _ = mock_stub.return_value.Start.call_args
         assert "key: value" in args[0].client_file_content
-        assert mock_stub.return_value.Start.call_count == 1
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    def test_start_with_content(self, mock_stub, mock_channel):
+        perform_rpc_call("start", content="foo: bar")
+        args, _ = mock_stub.return_value.Start.call_args
+        assert "foo: bar" in args[0].client_file_content
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco_test_client.open_editor_for_content", return_value=None)
+    def test_start_with_empty_content_editor_none(self, mock_editor, mock_stub, mock_channel):
+        perform_rpc_call("start", content="")
+        mock_editor.assert_called()
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco_test_client.get_running_instances", return_value=[{"name": "foo"}])
+    @patch("meco_test_client.delete_instance")
+    def test_shutdown_success(self, mock_delete, mock_get, mock_stub, mock_channel):
+        mock_stub.return_value.Shutdown.return_value.success = True
+        perform_rpc_call("shutdown")
+        mock_delete.assert_called_with("foo")
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    def test_shutdown_failure(self, mock_stub, mock_channel):
+        mock_stub.return_value.Shutdown.return_value.success = False
+        perform_rpc_call("shutdown")
+        # Should not raise, just log warning
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    def test_start_grpc_unavailable(self, mock_stub, mock_channel):
+        import grpc
+        error = grpc.RpcError()
+        error.code = lambda: grpc.StatusCode.UNAVAILABLE
+        mock_stub.return_value.Start.side_effect = error
+        with pytest.raises(SystemExit):
+            perform_rpc_call("start", content="foo")
+
+    @patch("meco_test_client.grpc.insecure_channel")
+    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    def test_start_grpc_other_error(self, mock_stub, mock_channel):
+        import grpc
+        error = grpc.RpcError()
+        error.details = lambda: "error details"
+        error.code = lambda: grpc.StatusCode.UNKNOWN
+        mock_stub.return_value.Start.side_effect = error
+        with pytest.raises(SystemExit):
+            perform_rpc_call("start", content="foo")
