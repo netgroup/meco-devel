@@ -7,7 +7,9 @@ A comprehensive guide for contributing to and extending the MECO emulator system
 ## Table of Contents
 
 - [API Architecture](#architecture)
+- [Development Environment Setup](#dev-setup)
 - [Development Workflow](#development-workflow)
+- [Protobuf & gRPC](#protobuf-grpc)
 - [Logging & Monitoring](#logging)
 - [Testing Strategies](#testing)
 - [Contribution Guidelines](#contribution)
@@ -25,7 +27,8 @@ graph TD
     B --> C{YAML Processor}
     C --> D[Validation Engine]
     C --> E[File Storage]
-    D --> F[Execution Engine]
+    D --> G[Instance Orchestrator]
+    G --> H[Instance Deployer (Container | System Container | VM)]
 ```
 
 ### gRPC Service Definition (`meco.proto`)
@@ -36,8 +39,9 @@ syntax = "proto3";
 service MecoService {
   // Diagnostic echo endpoint
   rpc MecoCall(MecoRequest) returns (MecoResponse);
-  
+
   // Main configuration endpoint
+  // NOTE: Deployment target (container, system container, or VM) is now inferred from each node's type in the YAML configuration. The user does not specify this explicitly; the server determines the correct deployment mode for each node.
   rpc Start(ResourceDescriptor) returns (StartResponse);
 }
 
@@ -71,6 +75,10 @@ message StartResponse {
 - **gRPC Interface**:
   - Thread-pooled request handling
   - Structured error propagation
+- **Instance Orchestrator** (formerly Execution Engine):
+  - Determines deployment mode for each node based on its type (e.g., Satellite → app container, Router → system container, NetworkOrchestrator → VM)
+  - Uses `incus launch` with `--vm` flag for VMs, or standard container launch for others
+  - Maintains a registry of all active instances (containers and VMs)
 
 #### Client-Side Components
 
@@ -82,72 +90,107 @@ message StartResponse {
   - Automatic retry logic
   - Timeout handling
   - TLS support (future)
+- **Instance Cleanup Logic**:
+  - The client automatically deletes both containers and VMs associated with MECO deployments (not just containers)
+
+---
+
+## Development Environment Setup <a id="dev-setup"></a>
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/netgroup/meco-devel.git
+cd meco-devel
+```
+
+### 2. Python Virtual Environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+### 3. Install Dependencies
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-dev.txt  # For development tools (black, ruff, pytest, etc.)
+```
+
+### 4. Compile Protobuf/gRPC Stubs
+
+```bash
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
+```
+
+### 5. (Optional) Enable CLI Auto-completion
+
+```bash
+eval "$(register-python-argcomplete meco)"
+eval "$(register-python-argcomplete client)"
+```
+
+### 6. Incus Setup (for local emulation)
+
+- Ensure Incus is installed and initialized (see main README).
+- Add your user to the `incus-admin` group and re-login.
+- For VM support, ensure `qemu-system` is installed on your system.
 
 ---
 
 ## Development Workflow <a id="development-workflow"></a>
 
-### Environment Setup
+### Making Code Changes
 
-1. **Clone Repository**:
+1. **Create a Feature Branch**
 
    ```bash
-   git clone https://github.com/netgroup/meco-devel
-   cd meco-devel
+   git checkout -b feature/my-feature
    ```
 
-2. **Virtual Environment**:
+2. **Edit Code**
+
+   - Update Python modules in `meco-devel/meco.py`, `client`, etc.
+   - If you change the gRPC interface, update `meco.proto` and recompile stubs.
+
+3. **Format and Lint**
 
    ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # Linux/macOS
-   # .venv\Scripts\activate  # Windows
+   black .
+   ruff .
    ```
 
-3. **Install Dependencies**:
+4. **Run Tests**
 
    ```bash
-   pip install -r requirements-dev.txt  # Includes development tools
-   ```
-
-4. **Protobuf Compilation**:
-
-   ```bash
-   python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
-   ```
-
-### Modification Workflow
-
-1. **Protocol Buffers Changes**:
-   - Modify `meco.proto`
-   - Regenerate stubs
-   - Update service implementations in `meco.py` and `meco_test_client.py`
-
-2. **Testing Cycle**:
-
-   ```bash
-   # Start server in test mode
-   meco on --test-mode
-   
-   # Run integration tests
    pytest tests/ -v
-   
-   # Manual test
-   client start --filepath samples/basic_config.yaml --dryrun
    ```
 
-3. **Debugging Tools**:
-   - Server introspection:
+5. **Commit and Push**
 
-     ```bash
-     meco status  # Shows active connections
-     ```
+   ```bash
+   git add .
+   git commit -m "Describe your change"
+   git push origin feature/my-feature
+   ```
 
-   - gRPC debugging:
+6. **Open a Pull Request**
 
-     ```bash
-     GRPC_VERBOSITY=DEBUG GRPC_TRACE=all meco on
-     ```
+   - Follow the contribution guidelines for PRs.
+
+---
+
+## Protobuf & gRPC <a id="protobuf-grpc"></a>
+
+- Edit `meco.proto` to change the API.
+- Recompile stubs after changes:
+
+  ```bash
+  python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
+  ```
+
+- Update both server (`meco.py`) and client as needed.
 
 ---
 
@@ -157,92 +200,113 @@ message StartResponse {
 
 ```python
 {
-  "timestamp": "2025-02-07 12:00:00",
+  "timestamp": "YYYY-MM-DD HH:MM:SS",
   "component": "server|client",
   "level": "INFO|WARN|ERROR",
   "operation": "Start|Validate|Persist",
+  "instance_type": "container|vm",  # Use this field for clarity in future logs
   "duration_ms": 45,
   "message": "Descriptive message",
-  "metadata": {}  # Context-specific data
+  "metadata": {}
 }
 ```
 
-### Monitoring Tools
+### Viewing Logs
 
-1. **Real-time Logs**:
-
-   ```bash
-   # Server logs
-   tail -f /tmp/meco_server.log | jq  # Requires jq for pretty-printing
-   
-   # Client logs
-   watch -n 1 cat /tmp/meco_client.log
-   ```
-
-2. **Metrics Collection** (Future):
-
-   ```bash
-   # Prometheus endpoint (planned)
-   curl localhost:9090/metrics
-   ```
+```bash
+tail -f /tmp/meco_server.log | jq
+tail -f /tmp/meco_client.log | jq
+```
 
 ---
 
 ## Testing Strategies <a id="testing"></a>
 
-### Test Types
+### 1. Unit Tests
 
-1. **Unit Tests**:
-   - Validation logic
-   - File operations
+- Located in `tests/unit/`
+- Run with:
 
-   ```bash
-   pytest tests/unit -v
-   ```
+  ```bash
+  pytest tests/unit -v
+  ```
 
-2. **Integration Tests**:
-   - gRPC communication
-   - Client-server interaction
+### 2. Integration Tests
 
-   ```bash
-   pytest tests/integration -v
-   ```
+- Located in `tests/`
+- Run with:
 
-3. **Performance Tests**:
+  ```bash
+  pytest tests/ -v
+  ```
+- Ensure both container and VM deployment paths are tested:
+  - Use a YAML sample for container-only deployment (e.g., `samples/containers_only.yaml`)
+  - Use a YAML sample with mixed container and VM roles (e.g., `samples/with_vm.yaml`)
+  - Example VM test:
+    ```bash
+    client start --filepath samples/with_vm.yaml
+    ```
 
-   ```bash
-   # Benchmark tool (example)
-   meco-bench --connections 100 --duration 30s
-   ```
+### 3. Manual Testing
+
+- Start the server:
+
+  ```bash
+  meco on
+  ```
+
+- Deploy a topology  
+  ```bash
+  client start --filepath profiles/example.yaml --dryrun
+  ```
+
+- Check status:
+
+  ```bash
+  meco status
+  # Output now lists both containers and VMs under active instances
+  ```
+
+- Shutdown:
+
+  ```bash
+  client shutdown
+  ```
+
+### 4. Debugging
+
+- Server introspection:
+
+  ```bash
+  meco status
+  # Shows all active containers and VMs
+  ```
+
+- gRPC debugging:
+
+  ```bash
+  GRPC_VERBOSITY=DEBUG GRPC_TRACE=all meco on
+  ```
 
 ---
 
 ## Contribution Guidelines <a id="contribution"></a>
 
-### Branch Strategy
-
-```mermaid
-gitGraph
-    commit
-    branch feature
-    checkout feature
-    commit
-    commit
-    checkout main
-    merge feature
-```
-
-**Workflow**:
-
-- Create feature branch from `main`
-- Keep commits atomic
-- Rebase before merging
-- Squash merge for features
+- Fork the repository and create a feature branch from `main`.
+- Keep commits atomic and descriptive.
+- Rebase before merging.
+- Run all tests and linters before submitting a PR.
+- Squash merge for features.
+- If modifying deployment logic, ensure VM/container compatibility is preserved.
 
 ---
 
-## Future Features <a id="future"></a>
+## Future Roadmap <a id="future"></a>
 
-- [ ] Docker/Kubernetes deployment
 - [ ] TLS support for gRPC
-- [ ] Add unit tests for CLI and gRPC services
+- [ ] Parallel deployment of instances
+- [ ] Adding Benchmarks
+
+---
+
+**For any questions or support, open a GitHub issue or contact the maintainers.**
