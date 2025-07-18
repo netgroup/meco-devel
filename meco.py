@@ -9,6 +9,7 @@ import argcomplete
 import logging
 import grpc
 from concurrent import futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 import uuid
 import subprocess
@@ -187,13 +188,55 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             )
 
     def Shutdown(self, request, context):
-        if os.path.exists(ACTIVITY_FLAG):
-            os.remove(ACTIVITY_FLAG)
-            logger.info("Emulation shut down successfully.")
-            return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
-        else:
-            logger.warning("No emulation was running.")
+        # Tear down all MECO instances in parallel, then clear flag
+        if not os.path.exists(ACTIVITY_FLAG):
+            logger.warning("No active emulation to shut down.")
             return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
+
+        try:
+            out = subprocess.run(
+                ["incus", "list", "--format=json"],
+                capture_output=True, text=True, check=True
+            ).stdout
+            insts = json.loads(out)
+            # select only those we marked with user.meco=true
+            names = [
+                i["name"] for i in insts
+                if i.get("config", {}).get("user.meco") == "true"
+            ]
+
+            if names:
+                workers = min(len(names), 32)
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures_ = {
+                        pool.submit(
+                            subprocess.run,
+                            ["incus", "delete", nm, "--force"],
+                            capture_output=True, text=True
+                        ): nm for nm in names
+                    }
+                    for fut in as_completed(futures_):
+                        nm = futures_[fut]
+                        try:
+                            res = fut.result()
+                            if res.returncode == 0:
+                                logger.info(f"Deleted instance: {nm}")
+                            else:
+                                logger.error(f"Failed delete {nm}: {res.stderr.strip()}")
+                        except Exception as e:
+                            logger.error(f"Error deleting {nm}: {e}")
+        except Exception as e:
+            logger.error(f"Shutdown cleanup error: {e}")
+
+        # finally clear the activity flag
+        try:
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Activity flag cleared.")
+        except OSError:
+            pass
+
+        logger.info("Emulation shut down successfully.")
+        return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
 
 
     def _get_save_path(self, filename):
@@ -225,21 +268,25 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return {"success": False, "message": f"Validation failed: {message}"}
 
     def _emulate_deployment(self, data):
+        # build a list of deploy tasks
+        tasks = []
         for node in data.get("nodes", []):
-            name, config_yaml = self._generate_incus_config(node)
+            name, cfg = self._generate_incus_config(node)
             ntype = node.get("type", "").lower()
-            # app containers: all satellites & terminals
-            if ntype == "terminal" or ntype.startswith("satellite"):
-                self._create_container(name, config_yaml)
-            # system containers: routers & gateways
-            elif ntype in ("router", "gateway"):
-                self._create_container(name, config_yaml)
-            # full VMs: network orchestrator
-            elif ntype == "networkorchestrator":
-                self._create_vm(name, config_yaml)
-            # fallback
+            if ntype == "networkorchestrator":
+                tasks.append(lambda n=name, c=cfg: self._create_vm(n, c))
             else:
-                self._create_container(name, config_yaml)
+                tasks.append(lambda n=name, c=cfg: self._create_container(n, c))
+
+        # run up to 32 in parallel
+        max_workers = min(len(tasks), 32) or 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures_ = [pool.submit(task) for task in tasks]
+            for fut in as_completed(futures_):
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.error(f"Deployment task error: {e}")
 
     def _generate_incus_config(self, node):
         instance_uuid = str(uuid.uuid4())
@@ -250,7 +297,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             "config": {
                 "image.architecture": "amd64",
                 "image.os": "Ubuntu",
-                "image.release": "focal",
+                "image.release": "noble",
                 "volatile.cloud-init.instance-id": instance_uuid,
                 "volatile.uuid": instance_uuid
             },
@@ -284,7 +331,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return
         logger.info(f"Creating container: {name}")
         subprocess.run([
-             "incus", "launch", "images:ubuntu/20.04", name,
+             "incus", "launch", "images:ubuntu/noble", name,
              "--storage", "default",
              "--config", f"user.user-data=@/tmp/{name}.yaml",
              "--config", "user.meco=true"
@@ -297,7 +344,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return
         logger.info(f"Creating VM: {name}")
         subprocess.run([
-            "incus", "launch", "--vm", "images:ubuntu/20.04", name,
+            "incus", "launch", "--vm", "images:ubuntu/noble", name,
             "--storage", "default",
             "--config", f"user.user-data=@/tmp/{name}.yaml",
             "--config", "user.meco=true"
@@ -305,13 +352,51 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         logger.info(f"VM {name} is ready.")
         
     def Shutdown(self, request, context):
-        if os.path.exists(ACTIVITY_FLAG):
-            os.remove(ACTIVITY_FLAG)
-            logger.info("Emulation shut down successfully.")
-            return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
-        else:
-            logger.warning("No emulation was running.")
+        if not os.path.exists(ACTIVITY_FLAG):
+            logger.warning("No active emulation to shut down.")
             return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
+        
+        # 1) Delete all MECO instances (containers & VMs)
+        try:
+            out = subprocess.run(
+                ["incus", "list", "--format=json"],
+                capture_output=True, text=True, check=True
+            ).stdout
+            names = [
+                inst["name"]
+                for inst in json.loads(out)
+                if inst.get("config", {}).get("user.meco") == "true"
+            ]
+            if names:
+                max_workers = min(len(names), 32)
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(
+                            subprocess.run,
+                            ["incus", "delete", name, "--force"],
+                            False
+                        ): name
+                        for name in names
+                    }
+                    for fut in as_completed(futures):
+                        nm = futures[fut]
+                        try:
+                            fut.result()
+                            logger.info(f"Deleted MECO instance: {nm}")
+                        except Exception as ex:
+                            logger.error(f"Failed deleting {nm}: {ex}")
+        except Exception as e:
+            logger.error(f"Error cleaning up instances: {e}")
+
+        # 2) Clear the activity flag
+        try:
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Activity flag cleared.")
+        except OSError:
+            pass
+
+        logger.info("Emulation shut down successfully.")
+        return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
 
 
 def serve_forever():
