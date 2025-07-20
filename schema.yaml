@@ -1,82 +1,141 @@
+$schema: "http://json-schema.org/draft-07/schema#"
+title: "MECO Topology Schema (mapping‑style node-types)"
+
 type: object
-required: [topology, node-types, nodes, visibility-constellation, visibility-ground]
-additionalProperties: true
+additionalProperties: false
+required:
+  - topology
+  - node-types
+  - nodes
+  - visibility-constellation
+  - visibility-ground
 
 properties:
+
   topology:
     type: object
-    required: [orbital-plane, sat-orbital-plane]
+    additionalProperties: false
+    required:
+      - orbital-plane
+      - sat-orbital-plane
     properties:
-      orbital-plane: { type: integer }
-      sat-orbital-plane: { type: integer }
+      orbital-plane:
+        type: integer
+        minimum: 1
+      sat-orbital-plane:
+        type: integer
+        minimum: 1
 
+  # <-- now an object, where each key is a node-type name -->
   node-types:
-    type: array
-    items:
+    type: object
+    additionalProperties:
       type: object
-      required: [type, properties]
-      additionalProperties: true
+      additionalProperties: false
+      required:
+        - interfaces
+        - properties
       properties:
-        type: { type: string }
-        inherits: { type: string }
+        inherits:
+          type: string
         interfaces:
           type: array
           items:
             type: object
+            additionalProperties: false
             required: [connects-to]
             properties:
               connects-to: { type: string }
         properties:
           type: object
+          additionalProperties: true
+          required: [image]
+          properties:
+            image: { type: string }
 
   nodes:
     type: array
     items:
       type: object
-      required: [id, type]
-      additionalProperties: true
+      additionalProperties: false
+      required:
+        - id
+        - type
+        - latitude
+        - longitude
+        - altitude
       properties:
-        id: { type: integer }
-        type: { type: string }
-        latitude: { type: number }
-        longitude: { type: number }
-        altitude: { type: number }
-        orbital-plane: { type: integer }
+        id:
+          type: integer
+          minimum: 0
+        type:
+          type: string
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        altitude:
+          type: number
+          minimum: 0
+        orbital-plane:
+          type: integer
+          minimum: 0
+        interfaces:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, type]
+            properties:
+              id:   { type: integer, minimum: 0 }
+              type: { type: string }
 
   visibility-constellation:
     type: array
-    items:
-      type: object
-      required: [time, connection]
-      properties:
-        time: { type: integer }
-        connection:
-          type: array
-          items:
-            type: object
-            required: [source, destination, delay, loss, bandwidth]
-            properties:
-              source: { type: integer }
-              destination: { type: integer }
-              delay: { type: integer }
-              loss: { type: integer }
-              bandwidth: { type: integer }
+    items: { $ref: "#/definitions/visibilityEntry" }
 
   visibility-ground:
     type: array
-    items:
-      type: object
-      required: [time, connection]
-      properties:
-        time: { type: integer }
-        connection:
-          type: array
-          items:
-            type: object
-            required: [source, destination, delay, loss, bandwidth]
-            properties:
-              source: { type: integer }
-              destination: { type: integer }
-              delay: { type: integer }
-              loss: { type: integer }
-              bandwidth: { type: integer }
+    items: { $ref: "#/definitions/visibilityEntry" }
+
+definitions:
+  visibilityEntry:
+    type: object
+    additionalProperties: false
+    required: [time, connection]
+    properties:
+      time:
+        type: number
+        minimum: 0
+      connection:
+        type: array
+        items:
+          type: object
+          additionalProperties: false
+          required:
+            - source
+            - destination
+            - delay
+            - loss
+            - bandwidth
+          properties:
+            source:
+              type: integer
+              minimum: 0
+            destination:
+              type: integer
+              minimum: 0
+            delay:
+              type: number
+              minimum: 0
+            loss:
+              type: number
+              minimum: 0
+              maximum: 100
+            bandwidth:
+              type: number
+              minimum: 0
