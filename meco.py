@@ -21,6 +21,7 @@ import json
 import meco_pb2
 import meco_pb2_grpc
 
+
 # === Colored Log Setup with [Server-LEVEL] Format ===
 class LogColors:
     RESET = "\033[0m"
@@ -29,6 +30,7 @@ class LogColors:
     YELLOW = "\033[33m"
     CYAN = "\033[36m"
     GRAY = "\033[90m"
+
 
 class ServerColorFormatter(logging.Formatter):
     def format(self, record):
@@ -43,6 +45,7 @@ class ServerColorFormatter(logging.Formatter):
         record.levelname = f"[Server-{record.levelname}]"
         record.msg = f"{level_color}{record.msg}{LogColors.RESET}"
         return super().format(record)
+
 
 handler = logging.StreamHandler()
 handler.setFormatter(ServerColorFormatter("%(levelname)s %(message)s"))
@@ -76,7 +79,12 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
     def _check_incus(self):
         try:
-            subprocess.run(["incus", "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            subprocess.run(
+                ["incus", "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False
@@ -123,12 +131,16 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 validation_result = self._validate_yaml(parsed_yaml)
                 if not validation_result["success"]:
                     logger.error(f"Validation failed: {validation_result['message']}")
-                    return meco_pb2.StartResponse(success=False, message=validation_result["message"])
+                    return meco_pb2.StartResponse(
+                        success=False, message=validation_result["message"]
+                    )
                 else:
                     if request.dry_run:
                         logger.info("YAML validation successful (dry run).")
                     else:
-                        logger.info("YAML validation successful, proceeding to deployment.")
+                        logger.info(
+                            "YAML validation successful, proceeding to deployment."
+                        )
             except YAMLError as e:
                 logger.error(f"YAML parsing failed: {str(e)}")
                 return meco_pb2.StartResponse(
@@ -152,7 +164,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 logger.warning(f"Emulation based on {running_file} is already running.")
                 return meco_pb2.StartResponse(
                     success=False,
-                    message=f"Emulation based on \"{running_file}\" is running. Please shut it down before starting a new one."
+                    message=f'Emulation based on "{running_file}" is running. Please shut it down before starting a new one.',
                 )
 
             # 5. Check for dry_run
@@ -162,7 +174,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     logger.error("'incus' not found. Please install Incus first.")
                     return meco_pb2.StartResponse(
                         success=False,
-                        message="Incus not found. Please install Incus before deploying."
+                        message="Incus not found. Please install Incus before deploying.",
                     )
                 try:
                     self._emulate_deployment(parsed_yaml)
@@ -191,17 +203,22 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         # Tear down all MECO instances in parallel, then clear flag
         if not os.path.exists(ACTIVITY_FLAG):
             logger.warning("No active emulation to shut down.")
-            return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
+            return meco_pb2.ShutdownResponse(
+                success=False, message="No active emulation."
+            )
 
         try:
             out = subprocess.run(
                 ["incus", "list", "--format=json"],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout
             insts = json.loads(out)
             # select only those we marked with user.meco=true
             names = [
-                i["name"] for i in insts
+                i["name"]
+                for i in insts
                 if i.get("config", {}).get("user.meco") == "true"
             ]
 
@@ -212,8 +229,10 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                         pool.submit(
                             subprocess.run,
                             ["incus", "delete", nm, "--force"],
-                            capture_output=True, text=True
-                        ): nm for nm in names
+                            capture_output=True,
+                            text=True,
+                        ): nm
+                        for nm in names
                     }
                     for fut in as_completed(futures_):
                         nm = futures_[fut]
@@ -222,7 +241,9 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                             if res.returncode == 0:
                                 logger.info(f"Deleted instance: {nm}")
                             else:
-                                logger.error(f"Failed delete {nm}: {res.stderr.strip()}")
+                                logger.error(
+                                    f"Failed delete {nm}: {res.stderr.strip()}"
+                                )
                         except Exception as e:
                             logger.error(f"Error deleting {nm}: {e}")
         except Exception as e:
@@ -237,7 +258,6 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
         logger.info("Emulation shut down successfully.")
         return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
-
 
     def _get_save_path(self, filename):
         # Ensure filename ends with .yaml or .yml
@@ -268,21 +288,42 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return {"success": False, "message": f"Validation failed: {message}"}
 
     def _emulate_deployment(self, data):
-        # build a list of deploy tasks
-        tasks = []
-        for node in data.get("nodes", []):
-            name, cfg = self._generate_incus_config(node)
-            ntype = node.get("type", "").lower()
-            if ntype == "networkorchestrator":
-                tasks.append(lambda n=name, c=cfg: self._create_vm(n, c))
-            else:
-                tasks.append(lambda n=name, c=cfg: self._create_container(n, c))
+        type_map = data["node-types"]                    # your mapping
 
-        # run up to 32 in parallel
+        tasks = []
+        for node in data["nodes"]:
+            # 1) get back the instance name AND the YAML string
+            name, cfg_yaml = self._generate_incus_config(node)
+
+            # 2) decide interfaces (inherit vs override)
+            if "interfaces" in node:
+                iface_defs = node["interfaces"]
+            else:
+                iface_defs = type_map.get(node["type"], {}).get("interfaces", [])
+            iface_count = len(iface_defs)
+
+            # 3) altitude → dummy-space/earth
+            bridge = "dummy-earth" if node.get("altitude", 0) == 0 else "dummy-space"
+            net_args = []
+            for _ in range(iface_count):
+                net_args += ["--network", bridge]
+
+            # 4) write the actual YAML string to disk
+            tmpfile = f"/tmp/{name}.yaml"
+            with open(tmpfile, "w") as f:
+                f.write(cfg_yaml)       # now cfg_yaml is a string!
+
+            # 5) enqueue the launch with your net_args
+            if node["type"].lower() == "gateway":
+                tasks.append(lambda n=name, nets=net_args: self._create_vm(n, nets))
+            else:
+                tasks.append(lambda n=name, nets=net_args: self._create_container(n, nets))
+
+        # 6) run them in parallel
         max_workers = min(len(tasks), 32) or 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures_ = [pool.submit(task) for task in tasks]
-            for fut in as_completed(futures_):
+            futures = [pool.submit(t) for t in tasks]
+            for fut in as_completed(futures):
                 try:
                     fut.result()
                 except Exception as e:
@@ -299,68 +340,99 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 "image.os": "Ubuntu",
                 "image.release": "noble",
                 "volatile.cloud-init.instance-id": instance_uuid,
-                "volatile.uuid": instance_uuid
+                "volatile.uuid": instance_uuid,
             },
             "devices": {
-                "eth0": {
-                    "name": "eth0",
-                    "network": "incusbr0",
-                    "type": "nic"
-                },
-                "root": {
-                    "path": "/",
-                    "pool": "default",
-                    "type": "disk"
-                }
+                "eth0": {"name": "eth0", "network": "incusbr0", "type": "nic"},
+                "root": {"path": "/", "pool": "default", "type": "disk"},
             },
             "ephemeral": False,
             "profiles": ["default"],
             "stateful": False,
-            "description": f"Container for {instance_name}"
+            "description": f"Container for {instance_name}",
         }
 
         return instance_name, yaml.dump(config, default_flow_style=False)
 
     def _instance_exists(self, name):
-        result = subprocess.run(["incus", "list", "--format=json"], capture_output=True, text=True)
+        result = subprocess.run(
+            ["incus", "list", "--format=json"], capture_output=True, text=True
+        )
         return name in result.stdout
 
-    def _create_container(self, name, config_yaml):
+    def _create_container(self, name: str, net_args: list):
+        """
+        Launch an Incus container named `name`, with its cloud-init already
+        written to /tmp/{name}.yaml, labeled user.meco=true, and attached
+        to the dummy-space or dummy-earth bridges via net_args.
+        """
         if self._instance_exists(name):
             logger.info(f"Container {name} already exists. Skipping creation.")
             return
+
         logger.info(f"Creating container: {name}")
-        subprocess.run([
-             "incus", "launch", "images:ubuntu/noble", name,
-             "--storage", "default",
-             "--config", f"user.user-data=@/tmp/{name}.yaml",
-             "--config", "user.meco=true"
-         ], check=True)
+        # Base launch command
+        cmd = [
+            "incus",
+            "launch",
+            "images:ubuntu/noble",
+            name,
+            "--storage",
+            "default",
+            "--config",
+            f"user.user-data=@/tmp/{name}.yaml",
+            "--config",
+            "user.meco=true",
+        ]
+        # …plus one --network <bridge> per interface
+        cmd += net_args
+
+        subprocess.run(cmd, check=True)
         logger.info(f"Container {name} is ready.")
 
-    def _create_vm(self, name, config_yaml):
+    def _create_vm(self, name: str, net_args: list):
+        """
+        Launch an Incus VM named `name`, with its cloud-init at
+        /tmp/{name}.yaml, labeled user.meco=true, and attached to the
+        dummy-space or dummy-earth bridges via net_args.
+        """
         if self._instance_exists(name):
             logger.info(f"VM {name} already exists. Skipping creation.")
             return
+
         logger.info(f"Creating VM: {name}")
-        subprocess.run([
-            "incus", "launch", "--vm", "images:ubuntu/noble", name,
-            "--storage", "default",
-            "--config", f"user.user-data=@/tmp/{name}.yaml",
-            "--config", "user.meco=true"
-        ], check=True)
+        cmd = [
+            "incus",
+            "launch",
+            "--vm",
+            "images:ubuntu/noble",
+            name,
+            "--storage",
+            "default",
+            "--config",
+            f"user.user-data=@/tmp/{name}.yaml",
+            "--config",
+            "user.meco=true",
+        ]
+        cmd += net_args
+
+        subprocess.run(cmd, check=True)
         logger.info(f"VM {name} is ready.")
-        
+
     def Shutdown(self, request, context):
         if not os.path.exists(ACTIVITY_FLAG):
             logger.warning("No active emulation to shut down.")
-            return meco_pb2.ShutdownResponse(success=False, message="No active emulation.")
-        
+            return meco_pb2.ShutdownResponse(
+                success=False, message="No active emulation."
+            )
+
         # 1) Delete all MECO instances (containers & VMs)
         try:
             out = subprocess.run(
                 ["incus", "list", "--format=json"],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout
             names = [
                 inst["name"]
@@ -368,13 +440,14 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 if inst.get("config", {}).get("user.meco") == "true"
             ]
             if names:
-                max_workers = min(len(names), 32)
+                max_workers = min(len(names), 32) or 1
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    # submit each delete() with check=True
                     futures = {
                         pool.submit(
                             subprocess.run,
                             ["incus", "delete", name, "--force"],
-                            False
+                            check=True,
                         ): name
                         for name in names
                     }
@@ -451,7 +524,9 @@ def server_status():
                 logger.info(f"Emulation based on {running_file} is running")
                 result = subprocess.run(
                     ["incus", "list", "--format=json"],
-                    capture_output=True, text=True, check=True
+                    capture_output=True,
+                    text=True,
+                    check=True,
                 )
                 names = [c["name"] for c in json.loads(result.stdout)]
                 logger.info(f"Active containers: {names}")
@@ -517,14 +592,34 @@ def server_off(force=False):
         try:
             out = subprocess.run(
                 ["incus", "list", "--format=json"],
-                capture_output=True, text=True, check=True
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout
-            for inst in json.loads(out):
-                name = inst.get("name", "")
-                parts = name.split("-", 1)
-                if len(parts) == 2 and parts[0].isdigit():
-                    logger.info(f"Deleting instance: {name}")
-                    subprocess.run(["incus", "delete", name, "--force"], check=True)
+            # filter only MECO instances
+            names = [
+                inst["name"]
+                for inst in json.loads(out)
+                if inst.get("config", {}).get("user.meco") == "true"
+            ]
+            if names:
+                max_workers = min(len(names), 32) or 1
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    futures = {
+                        pool.submit(
+                            subprocess.run,
+                            ["incus", "delete", name, "--force"],
+                            check=True,
+                        ): name
+                        for name in names
+                    }
+                    for fut in as_completed(futures):
+                        nm = futures[fut]
+                        try:
+                            fut.result()
+                            logger.info(f"Deleted instance: {nm}")
+                        except Exception as ex:
+                            logger.error(f"Failed deleting {nm}: {ex}")
         except Exception as e:
             logger.error(f"Error cleaning up emulation instances: {e}")
         finally:
@@ -651,7 +746,7 @@ def create_parser():
     off_parser.add_argument(
         "--force",
         action="store_true",
-        help="Force teardown of active emulation before stopping the server"
+        help="Force teardown of active emulation before stopping the server",
     )
     subparsers.add_parser("status", help="Show server status")
 
