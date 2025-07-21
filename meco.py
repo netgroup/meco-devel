@@ -17,6 +17,7 @@ from yaml import YAMLError
 import psutil  # For process checking
 from jsonschema import validate, ValidationError
 import json
+import re
 
 import meco_pb2
 import meco_pb2_grpc
@@ -31,6 +32,25 @@ class LogColors:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
+def _cleanup_ovs_bridges():
+    """
+    Remove all flows and all non-internal ports from ovs-space and ovs-earth.
+    """
+    for br in ("ovs-space", "ovs-earth"):
+        # 1) wipe all flows
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", br], check=False)
+
+        # 2) list all ports on this bridge
+        ports = subprocess.run(
+            ["sudo", "ovs-vsctl", "list-ports", br],
+            capture_output=True, text=True, check=True
+        ).stdout.splitlines()
+
+        # 3) remove each port except the internal one (named same as bridge)
+        for p in ports:
+            if p == br:
+                continue
+            subprocess.run(["sudo", "ovs-vsctl", "--if-exists", "del-port", br, p], check=False)
 
 class ServerColorFormatter(logging.Formatter):
     def format(self, record):
@@ -180,6 +200,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                     self._emulate_deployment(parsed_yaml)
                     with open(ACTIVITY_FLAG, "w") as f:
                         f.write(save_filename)
+                    self._install_initial_flows(parsed_yaml)
                 except Exception as e:
                     logger.error(f"Emulation failed: {str(e)}")
                     return meco_pb2.StartResponse(
@@ -256,6 +277,13 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         except OSError:
             pass
 
+        # Clean up OVS bridges
+        try:
+            _cleanup_ovs_bridges()
+            logger.info("OVS bridges cleaned up.")
+        except Exception as e:
+            logger.warning(f"Failed to clean up OVS bridges: {e}")
+
         logger.info("Emulation shut down successfully.")
         return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
 
@@ -314,7 +342,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 f.write(cfg_yaml)       # now cfg_yaml is a string!
 
             # 5) enqueue the launch with your net_args
-            if node["type"].lower() == "gateway":
+            if node["type"].lower() == "groundstation":
                 tasks.append(lambda n=name, nets=net_args: self._create_vm(n, nets))
             else:
                 tasks.append(lambda n=name, nets=net_args: self._create_container(n, nets))
@@ -418,6 +446,127 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
         subprocess.run(cmd, check=True)
         logger.info(f"VM {name} is ready.")
+
+    def _rehome_host_port(self, host_dev: str, parent_bridge: str, ovs_bridge: str):
+        """
+        Move a host interface from a Linux bridge into an OVS bridge cleanly:
+        1) bring the interface down
+        2) detach from its Linux dummy bridge
+        3) attach into the OVS bridge
+        4) bring the interface back up
+        """
+        # 1) Take the interface down
+        subprocess.run(["sudo", "ip", "link", "set", host_dev, "down"], check=True)
+
+        # 2) Remove from the Linux bridge
+        subprocess.run(["sudo", "brctl", "delif", parent_bridge, host_dev], check=True)
+
+        # 3) Add to the OVS bridge
+        subprocess.run(["sudo", "ovs-vsctl", "add-port", ovs_bridge, host_dev], check=True)
+
+        # 4) Bring it back up
+        subprocess.run(["sudo", "ip", "link", "set", host_dev, "up"], check=True)
+
+    def _build_port_map(self):
+        """
+        Returns a dict mapping (inst_name, iface_idx) → ovs_port_number
+        """
+        port_map = {}
+
+        # 1) list every meco instance
+        out = subprocess.run(
+            ["incus", "list", "--format=json"],
+            capture_output=True, text=True, check=True
+        ).stdout
+        names = [
+            inst["name"]
+            for inst in json.loads(out)
+            if inst.get("config", {}).get("user.meco") == "true"
+        ]
+
+        for name in names:
+            # 2) pull its volatile.eth*.host_name and hwaddr
+            raw = subprocess.run(
+                ["incus", "config", "show", name],
+                capture_output=True, text=True, check=True
+            ).stdout
+            cfg = yaml.safe_load(raw)
+            conf = cfg.get("config", {})
+            devs = cfg.get("devices", {})
+
+            # 3) for each ethX entry, move the host port into the correct OVS bridge
+            for key, host_dev in conf.items():
+                m = re.match(r"volatile\.eth(\d+)\.host_name", key)
+                if not m:
+                    continue
+                idx = int(m.group(1))
+                parent = devs.get(f"eth{idx}", {}).get("parent")
+                if not parent:
+                    continue
+                ovs_br = "ovs-earth" if parent == "dummy-earth" else "ovs-space"
+                
+                logger.info(f"Rehoming {host_dev} from {parent} → {ovs_br}")
+                
+                # detach from dummy bridge and attach into OVS
+                self._rehome_host_port(host_dev, parent, ovs_br)
+
+                # 4) query OVS for numeric port
+                show = subprocess.run(
+                    ["sudo", "ovs-ofctl", "show", ovs_br],
+                    capture_output=True, text=True, check=True
+                ).stdout
+                for line in show.splitlines():
+                    pat = rf"\s*(\d+)\({re.escape(host_dev)}\):"
+                    m2 = re.match(pat, line)
+                    if m2:
+                        port_map[(name, idx)] = int(m2.group(1))
+                        
+                        logger.info(f"Mapped ({name},eth{idx}) → OVS port {port_map[(name,idx)]}")
+
+                        break
+
+        return port_map
+
+    def _install_initial_flows(self, topo):
+        """
+        topo: the parsed YAML dict
+        Installs all flows described at the first timestamp (time=0).
+        """
+        port_map = self._build_port_map()
+
+        # pick the first time‐entry
+        sat_conns = topo["visibility-constellation"][0]["connection"]
+        grd_conns = topo["visibility-ground"][0]["connection"]
+
+        # build and push sat-space flows (bidirectional)
+        sat_flows = []
+        for link in sat_conns:
+            src_name = f"{link['source']}-{topo['nodes'][link['source']]['type']}"
+            dst_name = f"{link['destination']}-{topo['nodes'][link['destination']]['type']}"
+            p_src = port_map[(src_name, 0)]
+            p_dst = port_map[(dst_name, 0)]
+            sat_flows += [
+                f"in_port={p_src},actions=output:{p_dst}",
+                f"in_port={p_dst},actions=output:{p_src}",
+            ]
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", "ovs-space"], check=True)
+        for fl in sat_flows:
+            subprocess.run(["sudo", "ovs-ofctl", "add-flow", "ovs-space", fl], check=True)
+
+        # build and push term↔gateway flows on ovs-earth
+        earth_flows = []
+        for link in grd_conns:
+            src_name = f"{link['source']}-{topo['nodes'][link['source']]['type']}"
+            dst_name = f"{link['destination']}-{topo['nodes'][link['destination']]['type']}"
+            p_src = port_map[(src_name, 0)]
+            p_dst = port_map[(dst_name, 0)]
+            earth_flows += [
+                f"in_port={p_src},actions=output:{p_dst}",
+                f"in_port={p_dst},actions=output:{p_src}",
+            ]
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", "ovs-earth"], check=True)
+        for fl in earth_flows:
+            subprocess.run(["sudo", "ovs-ofctl", "add-flow", "ovs-earth", fl], check=True)
 
     def Shutdown(self, request, context):
         if not os.path.exists(ACTIVITY_FLAG):
@@ -625,6 +774,12 @@ def server_off(force=False):
         finally:
             os.remove(ACTIVITY_FLAG)
             logger.info("Activity flag cleared.")
+            # clean up any leftover OVS ports & flows
+            try:
+                _cleanup_ovs_bridges()
+                logger.info("OVS bridges cleaned up via server_off.")
+            except Exception as e:
+                logger.warning(f"Error cleaning OVS bridges in server_off: {e}")
 
     if not os.path.exists(PID_LIST_FILE):
         logger.info("No recorded Meco server PIDs found.")
