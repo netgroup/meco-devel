@@ -18,6 +18,7 @@ import psutil  # For process checking
 from jsonschema import validate, ValidationError
 import json
 import re
+import functools
 
 import meco_pb2
 import meco_pb2_grpc
@@ -32,25 +33,140 @@ class LogColors:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
-def _cleanup_ovs_bridges():
-    """
-    Remove all flows and all non-internal ports from ovs-space and ovs-earth.
-    """
-    for br in ("ovs-space", "ovs-earth"):
-        # 1) wipe all flows
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", br], check=False)
 
-        # 2) list all ports on this bridge
+def _setup_bridges():
+    # 1) Create dummy Linux bridges if they don't exist
+    for br in ("dummy-space", "dummy-earth"):
+        # Create bridge if it doesn't exist
+        if subprocess.run(["sudo", "brctl", "show", br], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL).returncode != 0:
+            logger.info(f"Creating Linux bridge: {br}")
+            subprocess.run(["sudo", "brctl", "addbr", br], check=True)
+            subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
+    
+    # 2) Create OVS bridges
+    for br in ("ovs-space", "ovs-earth"):
+        # Remove existing bridge if any
+        subprocess.run(
+            ["sudo", "ovs-vsctl", "--if-exists", "del-br", br],
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        # Create new bridge
+        subprocess.run(["sudo", "ovs-vsctl", "add-br", br], check=True)
+        subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
+        logger.info(f"OVS bridge {br} is up.")
+    
+    # 3) Bring up OVS bridges (existing logic)
+    for br in ("ovs-space", "ovs-earth"):
+        # Remove any stray OVS bridge (will be recreated if needed)
+        subprocess.run(
+            ["sudo", "ovs-vsctl", "--if-exists", "del-br", br],
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(["sudo", "ovs-vsctl", "add-br", br], check=True)
+        subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
+        logger.info(f"OVS bridge {br} is up.")
+
+
+    # 4) Ensure 'meco-base' Incus profile exists with placeholder network devices.
+    profile_name = "meco-base"
+    
+    # Check if profile exists
+    profile_list_result = subprocess.run(
+        ["incus", "profile", "list", "--format=csv"], capture_output=True, text=True, check=False
+    )
+    existing_profiles = [line.split(',')[0] for line in profile_list_result.stdout.splitlines()]
+    
+    if profile_name not in existing_profiles:
+        logger.info(f"Creating Incus profile '{profile_name}'.")
+        subprocess.run(["incus", "profile", "create", profile_name], check=True)
+    else:
+        logger.info(f"Incus profile '{profile_name}' already exists.")
+
+    # NEW: Add a root disk device to the 'meco-base' profile
+    root_device_name = "root"
+    # Configuration for the root disk: path /, uses 'default' storage pool, type disk
+    root_device_options = [
+        f"path=/",
+        f"pool=default", # Assumes a storage pool named 'default' exists.
+        f"type=disk"
+    ]
+
+    try:
+        logger.info(f"Attempting to add root disk device to profile '{profile_name}'.")
+        # Command to add a disk device to the profile
+        subprocess.run(
+            ["incus", "profile", "device", "add", profile_name, root_device_name, "disk"] + root_device_options,
+            check=True, # Will raise CalledProcessError on non-zero exit
+            capture_output=True, # Capture output for error messages
+            text=True # Decode output as text
+        )
+        logger.info(f"Successfully added root disk device to profile '{profile_name}'.")
+    except subprocess.CalledProcessError as e:
+        # Check if the error is because the root device already exists
+        if "Device already exists" in e.stderr or "exists in profile" in e.stderr:
+            logger.debug(f"Root disk device already exists in profile '{profile_name}'. Skipping.")
+        else:
+            # If it's a different, unexpected error, log and re-raise it
+            logger.error(f"Failed to add root disk device to profile '{profile_name}': {e.stderr}")
+            raise # Re-raise the exception
+            
+def _teardown_bridges():
+    """
+    1) Flush and remove all ports from ovs-space & ovs-earth, then delete the ports
+    2) Delete the Linux dummy bridges dummy-space & dummy-earth
+    """
+    # 1) Cleanup OVS bridges: flows + ports
+    for ovs_br in ("ovs-space", "ovs-earth"):
+        # Remove all OpenFlow rules
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", ovs_br], check=False)
+
+        # List and remove all non-internal ports
         ports = subprocess.run(
-            ["sudo", "ovs-vsctl", "list-ports", br],
-            capture_output=True, text=True, check=True
+            ["sudo", "ovs-vsctl", "list-ports", ovs_br],
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout.splitlines()
 
-        # 3) remove each port except the internal one (named same as bridge)
         for p in ports:
-            if p == br:
+            if p == ovs_br:
                 continue
-            subprocess.run(["sudo", "ovs-vsctl", "--if-exists", "del-port", br, p], check=False)
+            subprocess.run(
+                ["sudo", "ovs-vsctl", "--if-exists", "del-port", ovs_br, p], check=False
+            )
+            subprocess.run(["sudo", "ip", "link", "del", p], check=False)
+
+    # 2) Delete the Incus network objects first.
+    #    This will also delete the underlying Linux bridges managed by Incus.
+    for net in ("dummy-space", "dummy-earth"):
+        try:
+            subprocess.run(["sudo", "incus", "network", "delete", net], check=True)
+            logger.info(f"Deleted Incus network object: {net}")
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.strip() if e.stderr is not None else str(e)
+            logger.warning(f"Failed to delete Incus network {net}: {err_msg}")
+            # If it failed, it might be because the network didn't exist or was in use,
+            # but we want to continue with other teardown steps if possible.
+
+    logger.info("All Incus networks and associated Linux bridges removed.")
+
+    # 3) Remove Linux dummy bridges (idempotent)
+    for br in ("dummy-space", "dummy-earth"):
+        subprocess.run(["sudo", "ip", "link", "del", br], check=False)
+
+    # 4) Remove OVS bridges (idempotent)
+    for br in ("ovs-space", "ovs-earth"):
+        subprocess.run(["sudo", "ovs-vsctl", "--if-exists", "del-br", br], check=False)
+
+    # Remove the meco-base profile (idempotent)
+    try:
+        subprocess.run(["incus", "profile", "delete", "meco-base"], check=True)
+        logger.info("Deleted Incus profile: meco-base")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to delete Incus profile 'meco-base': {e}")
+
 
 class ServerColorFormatter(logging.Formatter):
     def format(self, record):
@@ -109,15 +225,34 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False
 
+    def _wait_running(self, name: str, timeout: int = 60) -> bool:
+        """Waits for an Incus instance to reach the 'Running' state."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                result = subprocess.run(
+                    ["incus", "list", name, "--format=json"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                instances_info = json.loads(result.stdout)
+                if instances_info and instances_info[0].get("status") == "Running":
+                    return True
+            except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+                logger.debug(f"Error checking status for {name}: {e}")
+            time.sleep(1) # Poll every second
+        logger.error(f"Instance {name} did not reach 'Running' state within {timeout} seconds.")
+        return False
+    
     def Start(self, request, context):
         """Handles Start requests with server_file_path or client_file_content."""
         try:
             file_content = None
-            save_filename = None
             # 1. Load file content
+            
             if request.HasField("server_file_path"):
                 file_path = request.server_file_path
-                save_filename = os.path.basename(file_path)
                 logger.info(f"Start() received a file path: {file_path}")
 
                 if not os.path.exists(file_path):
@@ -134,7 +269,6 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
             elif request.HasField("client_file_content"):
                 file_content = request.client_file_content
-                save_filename = os.path.basename(save_path)
                 logger.info(
                     f"Received inline file content (first 50 chars): {file_content[:50]}..."
                 )
@@ -196,16 +330,25 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                         success=False,
                         message="Incus not found. Please install Incus before deploying.",
                     )
+                # Proceed with deployment
                 try:
                     self._emulate_deployment(parsed_yaml)
-                    with open(ACTIVITY_FLAG, "w") as f:
-                        f.write(save_filename)
-                    self._install_initial_flows(parsed_yaml)
                 except Exception as e:
                     logger.error(f"Emulation failed: {str(e)}")
                     return meco_pb2.StartResponse(
                         success=False, message=f"Emulation failed: {str(e)}"
                     )
+
+                # Mark activity
+                with open(ACTIVITY_FLAG, "w") as f:
+                    activity_file_name = request.save_as if request.save_as else "last_emulation.yaml"
+                    f.write(activity_file_name)
+
+                # Install initial flows
+                try:
+                    self._install_initial_flows(parsed_yaml)
+                except Exception as e:
+                    logger.warning(f"Failed to install initial flows: {e}")
 
             logger.info("Start() request processed successfully")
             return meco_pb2.StartResponse(
@@ -277,13 +420,6 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         except OSError:
             pass
 
-        # Clean up OVS bridges
-        try:
-            _cleanup_ovs_bridges()
-            logger.info("OVS bridges cleaned up.")
-        except Exception as e:
-            logger.warning(f"Failed to clean up OVS bridges: {e}")
-
         logger.info("Emulation shut down successfully.")
         return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
 
@@ -291,6 +427,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         # Ensure filename ends with .yaml or .yml
         if not filename.lower().endswith((".yaml", ".yml")):
             filename += ".yaml"
+        os.makedirs(UPLOADS_DIR, exist_ok=True)
         return os.path.join(UPLOADS_DIR, filename)
 
     def _save_yaml(self, content, save_path):
@@ -316,266 +453,190 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             return {"success": False, "message": f"Validation failed: {message}"}
 
     def _emulate_deployment(self, data):
-        type_map = data["node-types"]                    # your mapping
-
+        type_map = data["node-types"]
         tasks = []
+
         for node in data["nodes"]:
-            # 1) get back the instance name AND the YAML string
-            name, cfg_yaml = self._generate_incus_config(node)
+            # 1) get the instance name
+            name = f"{node['id']}-{node['type']}"
 
-            # 2) decide interfaces (inherit vs override)
-            if "interfaces" in node:
-                iface_defs = node["interfaces"]
-            else:
-                iface_defs = type_map.get(node["type"], {}).get("interfaces", [])
-            iface_count = len(iface_defs)
+            # 2) write the cloud-init for this node
+            cloud_yaml = self._generate_cloudinit(node)
+            cloud_file = f"/tmp/{name}-cloud.yaml"
+            with open(cloud_file, "w") as f:
+                f.write(cloud_yaml)
 
-            # 3) altitude → dummy-space/earth
-            bridge = "dummy-earth" if node.get("altitude", 0) == 0 else "dummy-space"
-            net_args = []
-            for _ in range(iface_count):
-                net_args += ["--network", bridge]
+            # 3) figure out how many data-plane NICs, and which dummy bridge
+            iface_defs = node.get("interfaces",
+                                type_map.get(node["type"], {}).get("interfaces", []))
+            bridge     = "dummy-earth" if node.get("altitude", 0) == 0 else "dummy-space"
 
-            # 4) write the actual YAML string to disk
-            tmpfile = f"/tmp/{name}.yaml"
-            with open(tmpfile, "w") as f:
-                f.write(cfg_yaml)       # now cfg_yaml is a string!
-
-            # 5) enqueue the launch with your net_args
+            # 4) choose VM vs container, pick profile
+            profile = node["type"].lower()
             if node["type"].lower() == "groundstation":
-                tasks.append(lambda n=name, nets=net_args: self._create_vm(n, nets))
+                launcher = self._create_vm
+                profile_to_use = "meco-base"
             else:
-                tasks.append(lambda n=name, nets=net_args: self._create_container(n, nets))
+                launcher = self._create_container
+                profile_to_use = "meco-base"
 
-        # 6) run them in parallel
+            # 5) capture in our parallel task list (use functools.partial to avoid late binding bug)
+            tasks.append(functools.partial(launcher, name, profile_to_use, cloud_file, iface_defs, bridge, node_obj=node))
+            # Note: net_args is not used in the new _create_container/_create_vm methods, so passing an empty list.
+
+        # 6) launch in parallel
         max_workers = min(len(tasks), 32) or 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(t) for t in tasks]
             for fut in as_completed(futures):
-                try:
-                    fut.result()
-                except Exception as e:
-                    logger.error(f"Deployment task error: {e}")
+                fut.result()  # exceptions will bubble up
 
-    def _generate_incus_config(self, node):
-        instance_uuid = str(uuid.uuid4())
-        instance_name = f"{node['id']}-{node['type']}"
-
-        config = {
-            "architecture": "x86_64",
-            "config": {
-                "image.architecture": "amd64",
-                "image.os": "Ubuntu",
-                "image.release": "noble",
-                "volatile.cloud-init.instance-id": instance_uuid,
-                "volatile.uuid": instance_uuid,
-            },
-            "devices": {
-                "eth0": {"name": "eth0", "network": "incusbr0", "type": "nic"},
-                "root": {"path": "/", "pool": "default", "type": "disk"},
-            },
-            "ephemeral": False,
-            "profiles": ["default"],
-            "stateful": False,
-            "description": f"Container for {instance_name}",
-        }
-
-        return instance_name, yaml.dump(config, default_flow_style=False)
-
+    def _generate_cloudinit(self, node):
+        """
+        Build a #cloud-config snippet matching your sample:
+        - package_update
+        - packages: vim, curl, wget, net-tools
+        - runcmd writes to /var/log/meco-init.log
+        - ubuntu user with hashed passwd and empty SSH keys
+        """
+        node_name = f"{node['id']} ({node['type']})"
+        # IMPORTANT: Replace with a real SHA512 hash or remove if not needed.
+        # Example: mkpasswd -m sha-512 "your_password"
+        # For testing, you can use a known hash for 'password' like:
+        # "$6$rounds=40000$yoursaltstring$yourhashedpasswordstring"
+        # Or remove the 'passwd' line if you only rely on SSH keys.
+        passwd_hash = node.get(
+            "passwd_hash",
+            "$6$rounds=4096$mecosalt$mecoP4ssw0rdH4sh" # Replace with a real hash or remove
+        )
+        return f"""#cloud-config
+package_update: true
+packages:
+  - vim
+  - curl
+  - wget
+  - net-tools
+runcmd:
+  - echo "Node {node_name} started" > /var/log/meco-init.log
+users:
+  - name: ubuntu
+    passwd: {passwd_hash}
+    lock_passwd: false
+    shell: /bin/bash
+    ssh_authorized_keys: []
+    sudo: ALL=(ALL) NOPASSWD:ALL
+"""
+    
     def _instance_exists(self, name):
         result = subprocess.run(
             ["incus", "list", "--format=json"], capture_output=True, text=True
         )
         return name in result.stdout
 
-    def _create_container(self, name: str, net_args: list):
-        """
-        Launch an Incus container named `name`, with its cloud-init already
-        written to /tmp/{name}.yaml, labeled user.meco=true, and attached
-        to the dummy-space or dummy-earth bridges via net_args.
-        """
+    def _create_container(self, name: str, profile: str, cloud_file: str, iface_defs: list, bridge: str, node_obj: dict):
+        """Launch a container with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
-            logger.info(f"Container {name} already exists. Skipping creation.")
+            logger.info(f"Container {name} exists, skipping.")
             return
-
-        logger.info(f"Creating container: {name}")
-        # Base launch command
+        
+        # Launch the container with the base profile and cloud-init only
         cmd = [
-            "incus",
-            "launch",
-            "images:ubuntu/noble",
-            name,
-            "--storage",
-            "default",
-            "--config",
-            f"user.user-data=@/tmp/{name}.yaml",
-            "--config",
-            "user.meco=true",
+            "incus", "launch", "images:ubuntu/22.04", name,
+            "-p", profile,
+            "-c", "user.meco=true",
+            "-c", f"user.user-data=@{cloud_file}",
+            "-c", f"user.meco.type={node_obj['type']}", 
+            "-c", f"user.meco.altitude={node_obj['altitude']}", 
         ]
-        # …plus one --network <bridge> per interface
-        cmd += net_args
-
+        logger.info("Running: " + " ".join(cmd))
+        logger.info("DEBUG: Incus launch command list: %s" % cmd)
         subprocess.run(cmd, check=True)
-        logger.info(f"Container {name} is ready.")
 
-    def _create_vm(self, name: str, net_args: list):
-        """
-        Launch an Incus VM named `name`, with its cloud-init at
-        /tmp/{name}.yaml, labeled user.meco=true, and attached to the
-        dummy-space or dummy-earth bridges via net_args.
-        """
+        if not self._wait_running(name, timeout=30):
+            raise RuntimeError(f"{name} did not reach RUNNING")
+
+        logger.info(f"{name} RUNNING")
+
+        # Add network devices after launch
+        for i, iface_def in enumerate(iface_defs):
+            current_nic_bridge = bridge
+            device_name = f"eth{i}"
+            device_args = [
+                "incus", "config", "device", "add", name, device_name, "nic",
+                f"nictype=bridged", f"parent={current_nic_bridge}"
+            ]
+            # Only add ipv4/ipv6.address=none if parent bridge is a managed Incus network
+            # For dummy-space and dummy-earth (unmanaged), do NOT add these options
+            if i > 0 and not current_nic_bridge.startswith("dummy-"):
+                device_args.append("ipv4.address=none")
+                device_args.append("ipv6.address=none")
+            logger.info(f"Adding network device: {' '.join(device_args)}")
+            subprocess.run(device_args, check=True)
+
+    def _create_vm(self, name: str, profile: str, cloud_file: str, iface_defs: list, bridge: str, node_obj: dict):
+        """Launch a VM with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
-            logger.info(f"VM {name} already exists. Skipping creation.")
+            logger.info(f"VM {name} exists, skipping.")
             return
-
-        logger.info(f"Creating VM: {name}")
+        
+        # Launch the VM with the base profile and cloud-init only
         cmd = [
-            "incus",
-            "launch",
+            "incus", "launch", "images:ubuntu/noble", name,
             "--vm",
-            "images:ubuntu/noble",
-            name,
-            "--storage",
-            "default",
-            "--config",
-            f"user.user-data=@/tmp/{name}.yaml",
-            "--config",
-            "user.meco=true",
+            "-p", profile,
+            "-c", "user.meco=true",
+            "-c", f"user.user-data=@{cloud_file}",
+            "-c", f"user.meco.type={node_obj['type']}", 
+            "-c", f"user.meco.altitude={node_obj['altitude']}", 
         ]
-        cmd += net_args
-
+        logger.info("Running: " + " ".join(cmd))
+        logger.info("DEBUG: Incus launch command list: %s" % cmd)
         subprocess.run(cmd, check=True)
-        logger.info(f"VM {name} is ready.")
 
+        if not self._wait_running(name, timeout=20):
+            raise RuntimeError(f"{name} VM did not reach RUNNING")
+
+        logger.info(f"{name} RUNNING")
+
+        # Add network devices after launch
+        for i, iface_def in enumerate(iface_defs):
+            current_nic_bridge = bridge
+            device_name = f"eth{i}"
+            device_args = [
+                "incus", "config", "device", "add", name, device_name, "nic",
+                f"nictype=bridged", f"parent={current_nic_bridge}"
+            ]
+            # Only add ipv4/ipv6.address=none if parent bridge is a managed Incus network
+            # For dummy-space and dummy-earth (unmanaged), do NOT add these options
+            if i > 0 and not current_nic_bridge.startswith("dummy-"):
+                device_args.append("ipv4.address=none")
+                device_args.append("ipv6.address=none")
+            logger.info(f"Adding network device: {' '.join(device_args)}")
+            subprocess.run(device_args, check=True)
+    
     def _rehome_host_port(self, host_dev: str, parent_bridge: str, ovs_bridge: str):
         """
-        Move a host interface from a Linux bridge into an OVS bridge cleanly:
-        1) bring the interface down
-        2) detach from its Linux dummy bridge
-        3) attach into the OVS bridge
-        4) bring the interface back up
+        Move a host interface from a Linux bridge into an OVS bridge
         """
         # 1) Take the interface down
         subprocess.run(["sudo", "ip", "link", "set", host_dev, "down"], check=True)
 
-        # 2) Remove from the Linux bridge
+        # 2) Remove from Linux bridge
         subprocess.run(["sudo", "brctl", "delif", parent_bridge, host_dev], check=True)
 
-        # 3) Add to the OVS bridge
-        subprocess.run(["sudo", "ovs-vsctl", "add-port", ovs_bridge, host_dev], check=True)
+        # 3) Add to OVS bridge
+        subprocess.run(
+            ["sudo", "ovs-vsctl", "add-port", ovs_bridge, host_dev], check=True
+        )
 
         # 4) Bring it back up
         subprocess.run(["sudo", "ip", "link", "set", host_dev, "up"], check=True)
 
     def _build_port_map(self):
-        """
-        Returns a dict mapping (inst_name, iface_idx) → ovs_port_number
-        """
         port_map = {}
+        logger.info("Starting port mapping process...")
 
-        # 1) list every meco instance
-        out = subprocess.run(
-            ["incus", "list", "--format=json"],
-            capture_output=True, text=True, check=True
-        ).stdout
-        names = [
-            inst["name"]
-            for inst in json.loads(out)
-            if inst.get("config", {}).get("user.meco") == "true"
-        ]
-
-        for name in names:
-            # 2) pull its volatile.eth*.host_name and hwaddr
-            raw = subprocess.run(
-                ["incus", "config", "show", name],
-                capture_output=True, text=True, check=True
-            ).stdout
-            cfg = yaml.safe_load(raw)
-            conf = cfg.get("config", {})
-            devs = cfg.get("devices", {})
-
-            # 3) for each ethX entry, move the host port into the correct OVS bridge
-            for key, host_dev in conf.items():
-                m = re.match(r"volatile\.eth(\d+)\.host_name", key)
-                if not m:
-                    continue
-                idx = int(m.group(1))
-                parent = devs.get(f"eth{idx}", {}).get("parent")
-                if not parent:
-                    continue
-                ovs_br = "ovs-earth" if parent == "dummy-earth" else "ovs-space"
-                
-                logger.info(f"Rehoming {host_dev} from {parent} → {ovs_br}")
-                
-                # detach from dummy bridge and attach into OVS
-                self._rehome_host_port(host_dev, parent, ovs_br)
-
-                # 4) query OVS for numeric port
-                show = subprocess.run(
-                    ["sudo", "ovs-ofctl", "show", ovs_br],
-                    capture_output=True, text=True, check=True
-                ).stdout
-                for line in show.splitlines():
-                    pat = rf"\s*(\d+)\({re.escape(host_dev)}\):"
-                    m2 = re.match(pat, line)
-                    if m2:
-                        port_map[(name, idx)] = int(m2.group(1))
-                        
-                        logger.info(f"Mapped ({name},eth{idx}) → OVS port {port_map[(name,idx)]}")
-
-                        break
-
-        return port_map
-
-    def _install_initial_flows(self, topo):
-        """
-        topo: the parsed YAML dict
-        Installs all flows described at the first timestamp (time=0).
-        """
-        port_map = self._build_port_map()
-
-        # pick the first time‐entry
-        sat_conns = topo["visibility-constellation"][0]["connection"]
-        grd_conns = topo["visibility-ground"][0]["connection"]
-
-        # build and push sat-space flows (bidirectional)
-        sat_flows = []
-        for link in sat_conns:
-            src_name = f"{link['source']}-{topo['nodes'][link['source']]['type']}"
-            dst_name = f"{link['destination']}-{topo['nodes'][link['destination']]['type']}"
-            p_src = port_map[(src_name, 0)]
-            p_dst = port_map[(dst_name, 0)]
-            sat_flows += [
-                f"in_port={p_src},actions=output:{p_dst}",
-                f"in_port={p_dst},actions=output:{p_src}",
-            ]
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", "ovs-space"], check=True)
-        for fl in sat_flows:
-            subprocess.run(["sudo", "ovs-ofctl", "add-flow", "ovs-space", fl], check=True)
-
-        # build and push term↔gateway flows on ovs-earth
-        earth_flows = []
-        for link in grd_conns:
-            src_name = f"{link['source']}-{topo['nodes'][link['source']]['type']}"
-            dst_name = f"{link['destination']}-{topo['nodes'][link['destination']]['type']}"
-            p_src = port_map[(src_name, 0)]
-            p_dst = port_map[(dst_name, 0)]
-            earth_flows += [
-                f"in_port={p_src},actions=output:{p_dst}",
-                f"in_port={p_dst},actions=output:{p_src}",
-            ]
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", "ovs-earth"], check=True)
-        for fl in earth_flows:
-            subprocess.run(["sudo", "ovs-ofctl", "add-flow", "ovs-earth", fl], check=True)
-
-    def Shutdown(self, request, context):
-        if not os.path.exists(ACTIVITY_FLAG):
-            logger.warning("No active emulation to shut down.")
-            return meco_pb2.ShutdownResponse(
-                success=False, message="No active emulation."
-            )
-
-        # 1) Delete all MECO instances (containers & VMs)
+        # Get all MECO instances
         try:
             out = subprocess.run(
                 ["incus", "list", "--format=json"],
@@ -583,42 +644,211 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 text=True,
                 check=True,
             ).stdout
-            names = [
-                inst["name"]
-                for inst in json.loads(out)
+            instances = json.loads(out)
+            
+            # Filter MECO instances
+            meco_instances = [
+                inst for inst in instances
                 if inst.get("config", {}).get("user.meco") == "true"
+                and inst["status"] == "Running"
             ]
-            if names:
-                max_workers = min(len(names), 32) or 1
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    # submit each delete() with check=True
-                    futures = {
-                        pool.submit(
-                            subprocess.run,
-                            ["incus", "delete", name, "--force"],
-                            check=True,
-                        ): name
-                        for name in names
-                    }
-                    for fut in as_completed(futures):
-                        nm = futures[fut]
+            
+            if not meco_instances:
+                logger.warning("No running MECO instances found.")
+                return port_map
+                
+            logger.info(f"Found {len(meco_instances)} running MECO instances")
+            
+            for inst in meco_instances:
+                name = inst["name"]
+                logger.info(f"Processing instance: {name}")
+                node_altitude = inst.get("config", {}).get("user.meco.altitude", "0")
+                
+                # Determine which bridge based on altitude
+                if int(node_altitude) <= 10000:  # Earth
+                    parent_bridge = "dummy-earth"
+                    ovs_bridge = "ovs-earth"
+                else:  # Space
+                    parent_bridge = "dummy-space"
+                    ovs_bridge = "ovs-space"
+                    
+                try:
+                    # Get instance state which includes network info
+                    state_out = subprocess.run(
+                        ["incus", "query", f"/1.0/instances/{name}/state"],
+                        capture_output=True, text=True, check=True
+                    ).stdout
+                    
+                    state = json.loads(state_out)
+                    network_info = state.get("network", {})
+                    
+                    # Process each network interface
+                    for iface_name, iface_data in network_info.items():
+                        if not iface_name.startswith("eth"):
+                            continue
+                            
                         try:
-                            fut.result()
-                            logger.info(f"Deleted MECO instance: {nm}")
-                        except Exception as ex:
-                            logger.error(f"Failed deleting {nm}: {ex}")
+                            # Extract interface index
+                            idx = int(iface_name.replace("eth", ""))
+                            
+                            # Get host interface name
+                            host_dev = iface_data.get("host_name", "")
+                            if not host_dev:
+                                logger.warning(f"No host device found for {name}.{iface_name}")
+                                continue
+                                
+                            logger.info(f"Found host device {host_dev} for {name}.{iface_name}")
+                                
+                            # Check if interface is already in correct OVS bridge
+                            check_result = subprocess.run(
+                                ["sudo", "ovs-vsctl", "port-to-br", host_dev],
+                                capture_output=True, text=True
+                            )
+                            
+                            current_bridge = check_result.stdout.strip() if check_result.returncode == 0 else None
+                            
+                            if current_bridge != ovs_bridge:
+                                logger.info(f"Moving {host_dev} from {parent_bridge} to {ovs_bridge}")
+                                self._rehome_host_port(host_dev, parent_bridge, ovs_bridge)
+                            else:
+                                logger.info(f"{host_dev} already in {ovs_bridge}")
+                            
+                            # Get OVS port number
+                            port_result = subprocess.run(
+                                ["sudo", "ovs-vsctl", "get", "Interface", host_dev, "ofport"],
+                                capture_output=True, text=True, check=True
+                            )
+                            port_num = port_result.stdout.strip()
+                            
+                            if port_num.isdigit() and int(port_num) > 0:
+                                key = f"{name}:{idx}"
+                                port_map[key] = int(port_num)
+                                logger.info(f"Mapped {key} -> OVS port {port_num}")
+                            else:
+                                logger.warning(f"Invalid port number for {host_dev}: {port_num}")
+                                
+                        except Exception as e:
+                            logger.error(f"Error processing interface {name}.{iface_name}: {e}")
+                            continue
+                        
+                except Exception as e:
+                    logger.error(f"Error processing instance {name}: {e}")
+                    continue
+                    
         except Exception as e:
-            logger.error(f"Error cleaning up instances: {e}")
+            logger.error(f"Error building port map: {e}")
+            
+        logger.info(f"Port mapping complete. Mapped {len(port_map)} interfaces.")
+        return port_map
 
-        # 2) Clear the activity flag
+    def _install_initial_flows(self, topo):
         try:
-            os.remove(ACTIVITY_FLAG)
-            logger.info("Activity flag cleared.")
-        except OSError:
-            pass
+            port_map = self._build_port_map()
+            if not port_map:
+                logger.error("No ports mapped. Cannot install flows.")
+                return
+            
+            # Create a dictionary for quick node lookup by ID
+            nodes_by_id = {node['id']: node for node in topo['nodes']}
+            logger.info("Port map built successfully, proceeding to install flows...")
+            
+            # Process satellite connections
+            sat_flows = []
+            if "visibility-constellation" in topo and topo["visibility-constellation"]:
+                sat_conns = topo["visibility-constellation"][0]["connection"]
+                for link in sat_conns:
+                    try:
+                        src_node = nodes_by_id[link['source']]
+                        dst_node = nodes_by_id[link['destination']]
+                        
+                        src_name = f"{src_node['id']}-{src_node['type']}"
+                        dst_name = f"{dst_node['id']}-{dst_node['type']}"
+                        
+                        # Use interface index 0 for all space connections
+                        src_key = f"{src_name}:0"
+                        dst_key = f"{dst_name}:0"
+                        
+                        if src_key not in port_map or dst_key not in port_map:
+                            logger.error(f"Missing port mapping for {src_name} or {dst_name}")
+                            continue
+                        
+                        p_src = port_map[src_key]
+                        p_dst = port_map[dst_key]
+                        
+                        logger.info(f"Adding satellite flow: {src_name}({p_src}) → {dst_name}({p_dst})")
+                        
+                        sat_flows += [
+                            f"in_port={p_src},actions=output:{p_dst}",
+                            f"in_port={p_dst},actions=output:{p_src}",
+                        ]
+                    except Exception as e:
+                        logger.error(f"Failed to process satellite link: {e}")
+                        continue
+            
+            # Process ground connections
+            grd_flows = []
+            if "visibility-ground" in topo and topo["visibility-ground"]:
+                grd_conns = topo["visibility-ground"][0]["connection"]
+                for link in grd_conns:
+                    try:
+                        src_node = nodes_by_id[link['source']]
+                        dst_node = nodes_by_id[link['destination']]
+                        
+                        src_name = f"{src_node['id']}-{src_node['type']}"
+                        dst_name = f"{dst_node['id']}-{dst_node['type']}"
+                        
+                        # Use interface index 0 for all earth connections
+                        src_key = f"{src_name}:0"
+                        dst_key = f"{dst_name}:0"
+                        
+                        if src_key not in port_map or dst_key not in port_map:
+                            logger.error(f"Missing port mapping for {src_name} or {dst_name}")
+                            continue
+                        
+                        p_src = port_map[src_key]
+                        p_dst = port_map[dst_key]
+                        
+                        logger.info(f"Adding ground flow: {src_name}({p_src}) → {dst_name}({p_dst})")
+                        
+                        grd_flows += [
+                            f"in_port={p_src},actions=output:{p_dst}",
+                            f"in_port={p_dst},actions=output:{p_src}",
+                        ]
+                    except Exception as e:
+                        logger.error(f"Failed to process ground link: {e}")
+                        continue
+            
+            # Install satellite flows
+            if sat_flows:
+                subprocess.run(
+                    ["sudo", "ovs-ofctl", "del-flows", "ovs-space"], check=False
+                )
+                for fl in sat_flows:
+                    logger.info(f"Installing flow: {fl}")
+                    subprocess.run(
+                        ["sudo", "ovs-ofctl", "add-flow", "ovs-space", fl], check=True
+                    )
+                logger.info("Initial flows for sat-space installed.")
+            else:
+                logger.warning("No satellite flows to install")
+                
+            # Install ground flows
+            if grd_flows:
+                subprocess.run(
+                    ["sudo", "ovs-ofctl", "del-flows", "ovs-earth"], check=False
+                )
+                for fl in grd_flows:
+                    logger.info(f"Installing ground flow: {fl}")
+                    subprocess.run(
+                        ["sudo", "ovs-ofctl", "add-flow", "ovs-earth", fl], check=True
+                    )
+                logger.info("Initial flows for ground installed.")
+            else:
+                logger.warning("No ground flows to install")
 
-        logger.info("Emulation shut down successfully.")
-        return meco_pb2.ShutdownResponse(success=True, message="Emulation shut down.")
+        except Exception as e:
+            logger.error(f"Failed to install flows: {e}")
+            raise
 
 
 def serve_forever():
@@ -690,7 +920,7 @@ def server_status():
 
 
 def server_on():
-    """Turns the server ON (daemonizes it) and tracks its correct PID."""
+    """Turns the server ON (daemonizes it), creates the bridges, and tracks its correct PID."""
     if os.path.exists(PID_FILE):
         with open(PID_FILE, "r") as f:
             old_pid = int(f.read().strip())
@@ -699,6 +929,16 @@ def server_on():
             sys.exit(0)
         else:
             os.remove(PID_FILE)
+    # -----------------------------------------------------------------
+    # (A) Make sure the host-side bridges/networks/OVS switches exist
+    #     BEFORE we fork into the background.  One call, at boot.
+    # -----------------------------------------------------------------
+    try:
+        _setup_bridges()
+        logger.info("Bridges initialised; server ready for deployments.")
+    except Exception as e:
+        logger.error(f"Failed to set up bridges: {e}")
+        sys.exit(1)
 
     pid = os.fork()
     if pid > 0:
@@ -774,12 +1014,6 @@ def server_off(force=False):
         finally:
             os.remove(ACTIVITY_FLAG)
             logger.info("Activity flag cleared.")
-            # clean up any leftover OVS ports & flows
-            try:
-                _cleanup_ovs_bridges()
-                logger.info("OVS bridges cleaned up via server_off.")
-            except Exception as e:
-                logger.warning(f"Error cleaning OVS bridges in server_off: {e}")
 
     if not os.path.exists(PID_LIST_FILE):
         logger.info("No recorded Meco server PIDs found.")
@@ -852,7 +1086,6 @@ def server_off(force=False):
 
     if server_process_found:
         try:
-            os.remove(PID_FILE)
             if os.path.exists(ACTIVITY_FLAG):
                 os.remove(ACTIVITY_FLAG)
                 logger.info("Activity flag cleared.")
@@ -861,6 +1094,16 @@ def server_off(force=False):
             logger.info("No PID file found to remove.")
     else:
         logger.info("No active Meco server processes found.")
+
+    # -----------------------------------------------------------------
+    # Finally, when the daemon is going away for good, remove bridges.
+    # This runs whether or not --force was used (it’s safe & idempotent).
+    # -----------------------------------------------------------------
+    try:
+        _teardown_bridges()
+        logger.info("All bridges torn down.")
+    except Exception as e:
+        logger.warning(f"Failed to clean up bridges: {e}")
 
 
 def start_resource_descriptor(filename=None, file_content=None, save_as=None):
