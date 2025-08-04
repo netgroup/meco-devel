@@ -903,78 +903,68 @@ def server_off(force=False):
             logger.error(f"Error listing Incus instances: {e.stderr.strip()}")
         except Exception as e:
             logger.error(f"Error cleaning up emulation instances: {e}")
-        finally:
-            os.remove(ACTIVITY_FLAG)
-            logger.info("Activity flag cleared.")
 
     if not os.path.exists(PID_LIST_FILE):
         logger.info("No recorded Meco server PIDs found.")
-        return
-
-    server_process_found = False
-    killed_pids = []
-
-    try:
-        with open(PID_LIST_FILE, "r") as f:
-            pids = [int(line.strip()) for line in f.readlines()]
-    except FileNotFoundError:
-        logger.info("No recorded Meco server PIDs found.")
-        return
-    except ValueError:
-        logger.error("Error reading PID list file: Invalid PID format in file.")
-        return
-    except Exception as e:
-        logger.error(f"Error reading PID list file: {e}")
-        return
-
-    for pid in pids:
-        if psutil.pid_exists(pid):
-            server_process_found = True
-            logger.info(f"Killing Meco server process (PID: {pid})")
-
-            try:
-                # 1. SIGTERM (Graceful Shutdown)
-                os.kill(pid, signal.SIGTERM)
-            except OSError as e:
-                logger.exception(f"Error sending SIGTERM: {e}")
-
-            # 2. Wait for process to terminate
-            timeout = 5
-            process_still_running = True
-            for _ in range(timeout):
-                if not psutil.pid_exists(pid):
-                    process_still_running = False
-                    break
-                time.sleep(1)
-
-            # 3. Send SIGKILL if process is still running
-            if process_still_running:
-                logger.warning(
-                    f"Process (PID: {pid}) did not terminate. Sending SIGKILL."
-                )
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except OSError as e:
-                    logger.exception(f"Error sending SIGKILL: {e}")
-
-            killed_pids.append(pid)
-
-    # Rebuild PID list with remaining active PIDs
-    remaining_pids = []
-    for pid in pids:
-        if psutil.pid_exists(pid):
-            remaining_pids.append(str(pid))
-
-    # Write remaining PIDs to file or remove file if empty
-    if remaining_pids:
-        with open(PID_LIST_FILE, "w") as f:
-            f.write("\n".join(remaining_pids) + "\n")
     else:
+        killed_pids: List[int] = []
+        pids: List[int] = []
+
         try:
-            os.remove(PID_LIST_FILE)
-            logger.info("PID list file removed.")
+            with open(PID_LIST_FILE, "r") as f:
+                pids = [int(line.strip()) for line in f.readlines() if line.strip()]
         except FileNotFoundError:
-            pass
+            logger.info("No recorded Meco server PIDs found.")
+        except (ValueError, Exception) as e:
+            logger.error(f"Error reading PID list file: {e}")
+            pids = []  # Clear PIDs to prevent a bad loop
+
+        if pids:
+            for pid in pids:
+                if psutil.pid_exists(pid):
+                    logger.info(f"Killing Meco server process (PID: {pid})")
+
+                    # 1. Send SIGTERM for a graceful shutdown
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except OSError as e:
+                        logger.error(f"Error sending SIGTERM to PID {pid}: {e}")
+                    
+                    # 2. Wait for the process to terminate
+                    timeout = 5
+                    for _ in range(timeout):
+                        if not psutil.pid_exists(pid):
+                            break
+                        time.sleep(1)
+                    
+                    # 3. If still running, send SIGKILL to force termination
+                    if psutil.pid_exists(pid):
+                        logger.warning(
+                            f"Process (PID: {pid}) did not terminate. Sending SIGKILL."
+                        )
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError as e:
+                            logger.error(f"Error sending SIGKILL to PID {pid}: {e}")
+                    
+                    if not psutil.pid_exists(pid):
+                        killed_pids.append(pid)
+        else:
+            logger.info("PID file was empty or contained invalid data.")
+
+        # Section 3: Rebuild the PID file with any processes that survived.
+        remaining_pids = [str(pid) for pid in pids if psutil.pid_exists(pid)]
+
+        if remaining_pids:
+            with open(PID_LIST_FILE, "w") as f:
+                f.write("\n".join(remaining_pids) + "\n")
+            logger.info(f"PID list file updated. {len(remaining_pids)} processes remain.")
+        else:
+            try:
+                os.remove(PID_LIST_FILE)
+                logger.info("All Meco server processes were stopped. PID list file removed.")
+            except FileNotFoundError:
+                pass # Already gone, no need to log an error
 
     if server_process_found:
         try:
