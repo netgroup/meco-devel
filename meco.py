@@ -881,6 +881,8 @@ def server_off(force=False):
                         pool.submit(
                             subprocess.run,
                             ["incus", "delete", name, "--force"],
+                            capture_output=True,
+                            text=True,
                             check=True,
                         ): name
                         for name in names
@@ -890,8 +892,15 @@ def server_off(force=False):
                         try:
                             fut.result()
                             logger.info(f"Deleted instance: {nm}")
+                        except subprocess.CalledProcessError as ex:
+                            logger.error(f"Failed deleting {nm}: {ex.stderr.strip()}")
                         except Exception as ex:
                             logger.error(f"Failed deleting {nm}: {ex}")
+            else:
+                logger.info("No active emulation instances found to delete.")
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error listing Incus instances: {e.stderr.strip()}")
         except Exception as e:
             logger.error(f"Error cleaning up emulation instances: {e}")
         finally:
