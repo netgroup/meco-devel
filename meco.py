@@ -612,7 +612,7 @@ users:
         )
         return name in result.stdout
 
-    def _create_container(self, name: str, profile: str, cloud_file: str, iface_defs: list, bridge: str, node_obj: dict):
+    def _create_container(self, name: str, cloud_file: str, iface_defs: List, node_obj: Dict):
         """Launch a container with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
             logger.info(f"Container {name} exists, skipping.")
@@ -621,15 +621,15 @@ users:
         # Launch the container with the base profile and cloud-init only
         cmd = [
             "incus", "launch", "images:ubuntu/22.04", name,
-            "-p", profile,
+            "-p", "meco-base",
+            "--network", "incus-br-int",
             "-c", "user.meco=true",
             "-c", f"user.user-data=@{cloud_file}",
             "-c", f"user.meco.type={node_obj['type']}", 
             "-c", f"user.meco.altitude={node_obj['altitude']}", 
         ]
         logger.info("Running: " + " ".join(cmd))
-        logger.info("DEBUG: Incus launch command list: %s" % cmd)
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if not self._wait_running(name, timeout=30):
             raise RuntimeError(f"{name} did not reach RUNNING")
@@ -637,20 +637,14 @@ users:
         logger.info(f"{name} RUNNING")
 
         # Add network devices after launch
-        for i, iface_def in enumerate(iface_defs):
-            current_nic_bridge = bridge
-            device_name = f"eth{i}"
+        for i in range(1, len(iface_defs)):
+            device_name = f"{name}-eth{i}"
             device_args = [
-                "incus", "config", "device", "add", name, device_name, "nic",
-                f"nictype=bridged", f"parent={current_nic_bridge}"
+                "incus", "config", "device", "add", name, device_name,
+                "nic", "network=incus-br-int"
             ]
-            # Only add ipv4/ipv6.address=none if parent bridge is a managed Incus network
-            # For dummy-space and dummy-earth (unmanaged), do NOT add these options
-            if i > 0 and not current_nic_bridge.startswith("dummy-"):
-                device_args.append("ipv4.address=none")
-                device_args.append("ipv6.address=none")
             logger.info(f"Adding network device: {' '.join(device_args)}")
-            subprocess.run(device_args, check=True)
+            subprocess.run(device_args, check=True, stdout=subprocess.DEVNULL)
 
     def _create_vm(self, name: str, profile: str, cloud_file: str, iface_defs: list, bridge: str, node_obj: dict):
         """Launch a VM with one profile, N networks, and cloud-init."""
