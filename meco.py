@@ -677,257 +677,73 @@ users:
 
         logger.info(f"{name} RUNNING")
 
-        # Add network devices after launch
-        for i, iface_def in enumerate(iface_defs):
-            current_nic_bridge = bridge
-            device_name = f"eth{i}"
-            device_args = [
-                "incus", "config", "device", "add", name, device_name, "nic",
-                f"nictype=bridged", f"parent={current_nic_bridge}"
-            ]
-            # Only add ipv4/ipv6.address=none if parent bridge is a managed Incus network
-            # For dummy-space and dummy-earth (unmanaged), do NOT add these options
-            if i > 0 and not current_nic_bridge.startswith("dummy-"):
-                device_args.append("ipv4.address=none")
-                device_args.append("ipv6.address=none")
-            logger.info(f"Adding network device: {' '.join(device_args)}")
-            subprocess.run(device_args, check=True)
-    
-    def _rehome_host_port(self, host_dev: str, parent_bridge: str, ovs_bridge: str):
-        """
-        Move a host interface from a Linux bridge into an OVS bridge
-        """
-        # 1) Take the interface down
-        subprocess.run(["sudo", "ip", "link", "set", host_dev, "down"], check=True)
-
-        # 2) Remove from Linux bridge
-        subprocess.run(["sudo", "brctl", "delif", parent_bridge, host_dev], check=True)
-
-        # 3) Add to OVS bridge
-        subprocess.run(
-            ["sudo", "ovs-vsctl", "add-port", ovs_bridge, host_dev], check=True
-        )
-
-        # 4) Bring it back up
-        subprocess.run(["sudo", "ip", "link", "set", host_dev, "up"], check=True)
-
-    def _build_port_map(self):
-        port_map = {}
-        logger.info("Starting port mapping process...")
-
-        # Get all MECO instances
-        try:
-            out = subprocess.run(
-                ["incus", "list", "--format=json"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            instances = json.loads(out)
-            
-            # Filter MECO instances
-            meco_instances = [
-                inst for inst in instances
-                if inst.get("config", {}).get("user.meco") == "true"
-                and inst["status"] == "Running"
-            ]
-            
-            if not meco_instances:
-                logger.warning("No running MECO instances found.")
-                return port_map
-                
-            logger.info(f"Found {len(meco_instances)} running MECO instances")
-            
-            for inst in meco_instances:
-                name = inst["name"]
-                logger.info(f"Processing instance: {name}")
-                node_altitude = inst.get("config", {}).get("user.meco.altitude", "0")
-                
-                # Determine which bridge based on altitude
-                if int(node_altitude) <= 10000:  # Earth
-                    parent_bridge = "dummy-earth"
-                    ovs_bridge = "ovs-earth"
-                else:  # Space
-                    parent_bridge = "dummy-space"
-                    ovs_bridge = "ovs-space"
-                    
-                try:
-                    # Get instance state which includes network info
-                    state_out = subprocess.run(
-                        ["incus", "query", f"/1.0/instances/{name}/state"],
-                        capture_output=True, text=True, check=True
-                    ).stdout
-                    
-                    state = json.loads(state_out)
-                    network_info = state.get("network", {})
-                    
-                    # Process each network interface
-                    for iface_name, iface_data in network_info.items():
-                        if not iface_name.startswith("eth"):
-                            continue
-                            
-                        try:
-                            # Extract interface index
-                            idx = int(iface_name.replace("eth", ""))
-                            
-                            # Get host interface name
-                            host_dev = iface_data.get("host_name", "")
-                            if not host_dev:
-                                logger.warning(f"No host device found for {name}.{iface_name}")
-                                continue
-                                
-                            logger.info(f"Found host device {host_dev} for {name}.{iface_name}")
-                                
-                            # Check if interface is already in correct OVS bridge
-                            check_result = subprocess.run(
-                                ["sudo", "ovs-vsctl", "port-to-br", host_dev],
-                                capture_output=True, text=True
-                            )
-                            
-                            current_bridge = check_result.stdout.strip() if check_result.returncode == 0 else None
-                            
-                            if current_bridge != ovs_bridge:
-                                logger.info(f"Moving {host_dev} from {parent_bridge} to {ovs_bridge}")
-                                self._rehome_host_port(host_dev, parent_bridge, ovs_bridge)
-                            else:
-                                logger.info(f"{host_dev} already in {ovs_bridge}")
-                            
-                            # Get OVS port number
-                            port_result = subprocess.run(
-                                ["sudo", "ovs-vsctl", "get", "Interface", host_dev, "ofport"],
-                                capture_output=True, text=True, check=True
-                            )
-                            port_num = port_result.stdout.strip()
-                            
-                            if port_num.isdigit() and int(port_num) > 0:
-                                key = f"{name}:{idx}"
-                                port_map[key] = int(port_num)
-                                logger.info(f"Mapped {key} -> OVS port {port_num}")
-                            else:
-                                logger.warning(f"Invalid port number for {host_dev}: {port_num}")
-                                
-                        except Exception as e:
-                            logger.error(f"Error processing interface {name}.{iface_name}: {e}")
-                            continue
-                        
-                except Exception as e:
-                    logger.error(f"Error processing instance {name}: {e}")
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Error building port map: {e}")
-            
-        logger.info(f"Port mapping complete. Mapped {len(port_map)} interfaces.")
-        return port_map
-
     def _install_initial_flows(self, topo):
-        try:
-            port_map = self._build_port_map()
-            if not port_map:
-                logger.error("No ports mapped. Cannot install flows.")
-                return
-            
-            # Create a dictionary for quick node lookup by ID
-            nodes_by_id = {node['id']: node for node in topo['nodes']}
-            logger.info("Port map built successfully, proceeding to install flows...")
-            
-            # Process satellite connections
-            sat_flows = []
-            if "visibility-constellation" in topo and topo["visibility-constellation"]:
-                sat_conns = topo["visibility-constellation"][0]["connection"]
-                for link in sat_conns:
-                    try:
-                        src_node = nodes_by_id[link['source']]
-                        dst_node = nodes_by_id[link['destination']]
-                        
-                        src_name = f"{src_node['id']}-{src_node['type']}"
-                        dst_name = f"{dst_node['id']}-{dst_node['type']}"
-                        
-                        # Use interface index 0 for all space connections
-                        src_key = f"{src_name}:0"
-                        dst_key = f"{dst_name}:0"
-                        
-                        if src_key not in port_map or dst_key not in port_map:
-                            logger.error(f"Missing port mapping for {src_name} or {dst_name}")
-                            continue
-                        
-                        p_src = port_map[src_key]
-                        p_dst = port_map[dst_key]
-                        
-                        logger.info(f"Adding satellite flow: {src_name}({p_src}) → {dst_name}({p_dst})")
-                        
-                        sat_flows += [
-                            f"in_port={p_src},actions=output:{p_dst}",
-                            f"in_port={p_dst},actions=output:{p_src}",
-                        ]
-                    except Exception as e:
-                        logger.error(f"Failed to process satellite link: {e}")
-                        continue
-            
-            # Process ground connections
-            grd_flows = []
-            if "visibility-ground" in topo and topo["visibility-ground"]:
-                grd_conns = topo["visibility-ground"][0]["connection"]
-                for link in grd_conns:
-                    try:
-                        src_node = nodes_by_id[link['source']]
-                        dst_node = nodes_by_id[link['destination']]
-                        
-                        src_name = f"{src_node['id']}-{src_node['type']}"
-                        dst_name = f"{dst_node['id']}-{dst_node['type']}"
-                        
-                        # Use interface index 0 for all earth connections
-                        src_key = f"{src_name}:0"
-                        dst_key = f"{dst_name}:0"
-                        
-                        if src_key not in port_map or dst_key not in port_map:
-                            logger.error(f"Missing port mapping for {src_name} or {dst_name}")
-                            continue
-                        
-                        p_src = port_map[src_key]
-                        p_dst = port_map[dst_key]
-                        
-                        logger.info(f"Adding ground flow: {src_name}({p_src}) → {dst_name}({p_dst})")
-                        
-                        grd_flows += [
-                            f"in_port={p_src},actions=output:{p_dst}",
-                            f"in_port={p_dst},actions=output:{p_src}",
-                        ]
-                    except Exception as e:
-                        logger.error(f"Failed to process ground link: {e}")
-                        continue
-            
-            # Install satellite flows
-            if sat_flows:
-                subprocess.run(
-                    ["sudo", "ovs-ofctl", "del-flows", "ovs-space"], check=False
-                )
-                for fl in sat_flows:
-                    logger.info(f"Installing flow: {fl}")
-                    subprocess.run(
-                        ["sudo", "ovs-ofctl", "add-flow", "ovs-space", fl], check=True
-                    )
-                logger.info("Initial flows for sat-space installed.")
-            else:
-                logger.warning("No satellite flows to install")
-                
-            # Install ground flows
-            if grd_flows:
-                subprocess.run(
-                    ["sudo", "ovs-ofctl", "del-flows", "ovs-earth"], check=False
-                )
-                for fl in grd_flows:
-                    logger.info(f"Installing ground flow: {fl}")
-                    subprocess.run(
-                        ["sudo", "ovs-ofctl", "add-flow", "ovs-earth", fl], check=True
-                    )
-                logger.info("Initial flows for ground installed.")
-            else:
-                logger.warning("No ground flows to install")
+        """
+        Installs flows for every link in the topology.
+        """
+        port_map = _build_port_map()
+        if not port_map:
+            logger.error("No ports mapped; cannot install flows.")
+            return
 
-        except Exception as e:
-            logger.error(f"Failed to install flows: {e}")
-            raise
+        # 2) Collect all (src, dst, delay, loss, bandwidth)
+        links = []
+        for section in ("visibility-constellation", "visibility-ground"):
+            for snap in topo.get(section, []):
+                for conn in snap.get("connection", []):
+                    links.append((
+                        conn["source"], conn["destination"],
+                        # conn.get("delay", 0),
+                        # conn.get("loss", 0),
+                        # conn.get("bandwidth", 0)
+                    ))
+
+        # Group flows by bridge
+        bridge_flows: Dict[str, List[str]] = {
+            "incus-br-int": [], "incus-br-tun": []}
+
+        # 3) Build flow rules and TC commands
+        of_rules = []
+        for src_id, dst_id in links:
+            src_key = f"{src_id}:0"
+            dst_key = f"{dst_id}:0"
+
+            src_info = port_map.get(src_key)
+            dst_info = port_map.get(dst_key)
+
+            if src_info is None or dst_info is None:
+                logger.error(f"Missing port_map entries for {
+                             src_key} or {dst_key}. Skipping flow.")
+                continue
+
+            src_bridge, p_src = src_info
+            dst_bridge, p_dst = dst_info
+
+            if src_bridge != dst_bridge:
+                logger.error(f"Link between {src_key} and {dst_key} spans different bridges ({
+                             src_bridge} vs {dst_bridge}). This is not supported. Skipping flow.")
+                continue
+
+            of_rules += [
+                f"priority=100,in_port={p_src},actions=output:{p_dst}",
+                f"priority=100,in_port={p_dst},actions=output:{p_src}"
+            ]
+            bridge_flows[src_bridge].extend(of_rules)
+
+            """
+            # TC on host devices
+            dev_src = port_map.host_dev[src_key]
+            dev_dst = port_map.host_dev[dst_key]
+            apply_tc(dev_src, delay, loss, bw)
+            apply_tc(dev_dst, delay, loss, bw)
+            """
+        # 4) Default drop
+        for br, flows in bridge_flows.items():
+            if flows:
+                flows.append("priority=0,actions=drop")
+                _apply_openflow_rules(br, flows)
+            else:
+                logger.info(f"No flows to apply for bridge {br}.")
 
 
 def serve_forever():
