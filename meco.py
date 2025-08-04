@@ -35,74 +35,52 @@ class LogColors:
 
 
 def _setup_bridges():
-    # 1) Create dummy Linux bridges if they don't exist
-    for br in ("dummy-space", "dummy-earth"):
-        # Create bridge if it doesn't exist
-        if subprocess.run(["sudo", "brctl", "show", br], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL).returncode != 0:
-            logger.info(f"Creating Linux bridge: {br}")
-            subprocess.run(["sudo", "brctl", "addbr", br], check=True)
-            subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
-    
-    # 2) Create OVS bridges
-    for br in ("ovs-space", "ovs-earth"):
-        # Remove existing bridge if any
-        subprocess.run(
-            ["sudo", "ovs-vsctl", "--if-exists", "del-br", br],
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        # Create new bridge
-        subprocess.run(["sudo", "ovs-vsctl", "add-br", br], check=True)
-        subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
-        logger.info(f"OVS bridge {br} is up.")
-    
-    # 3) Bring up OVS bridges (existing logic)
-    for br in ("ovs-space", "ovs-earth"):
-        # Remove any stray OVS bridge (will be recreated if needed)
-        subprocess.run(
-            ["sudo", "ovs-vsctl", "--if-exists", "del-br", br],
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        subprocess.run(["sudo", "ovs-vsctl", "add-br", br], check=True)
-        subprocess.run(["sudo", "ip", "link", "set", br, "up"], check=True)
-        logger.info(f"OVS bridge {br} is up.")
+    """
+    Create necessary Incus networks and set up profiles for containers and VMs.
+    - Creates two OVS-backed Incus bridges: 'incus-br-int' and 'incus-br-tun'.
+    - Sets up or updates the 'meco-base' profile for containers and 'meco-vm' for VMs.
+    - Ensures 'eth0' in each profile is bridged to 'incus-br-int'.
+    """
+    # Create the required Incus networks using Open vSwitch backend.
+    for net in ("incus-br-int", "incus-br-tun"):
+        subprocess.run([
+            "sudo", "incus", "network", "create", net,
+            "--type=bridge",
+            "bridge.driver=openvswitch",
+            "dns.mode=none"
+        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"Incus network '{net}' created")
 
+    # Ensure the 'meco-base' profile exists for containers.
+    profile_container = "meco-base"
+    profiles = subprocess.run(["incus", "profile", "list", "--format=csv"],
+                              capture_output=True, text=True).stdout.splitlines()
+    existing = {p.split(',')[0] for p in profiles}
+    if profile_container not in existing:
+        subprocess.run(["incus", "profile", "create",
+                       profile_container], check=True, stdout=subprocess.DEVNULL)
+        
+    # Ensure root disk device is present, replace or add 'eth0' bridged to incus-br-int.
+    root_opts = ["path=/", "pool=sshfs-pool", "type=disk"]
+    subprocess.run(["incus", "profile", "device", "add", profile_container,
+                   "root", "disk"] + root_opts, check=False,stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["incus", "profile", "device", "remove",
+                   profile_container, "eth0"], check=False,stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.run(["incus", "profile", "device", "add", profile_container, "eth0", "nic", "nictype=bridged",
+                   "parent=incus-br-int"], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+    logger.info(
+        f"Profile '{profile_container}' configured with eth0 -> incus-br-int.")
 
-    # 4) Ensure 'meco-base' Incus profile exists with placeholder network devices.
-    profile_name = "meco-base"
-    
-    # Check if profile exists
-    profile_list_result = subprocess.run(
-        ["incus", "profile", "list", "--format=csv"], capture_output=True, text=True, check=False
-    )
-    existing_profiles = [line.split(',')[0] for line in profile_list_result.stdout.splitlines()]
-    
-    if profile_name not in existing_profiles:
-        logger.info(f"Creating Incus profile '{profile_name}'.")
-        subprocess.run(["incus", "profile", "create", profile_name], check=True)
-    else:
-        logger.info(f"Incus profile '{profile_name}' already exists.")
+    # Create 'meco-vm' profile for VMs by copying from 'meco-base', add eth1 bridged to incus-br-int.
+    profile_vm = "meco-vm"
+    if profile_vm not in existing:
+        subprocess.run(["incus", "profile", "copy",
+                       profile_container, profile_vm], check=True)
+        subprocess.run([
+            "incus", "profile", "device", "add", profile_vm, "eth1", "nic",
+            "nictype=bridged", "parent=incus-br-int"
+        ], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
-    # NEW: Add a root disk device to the 'meco-base' profile
-    root_device_name = "root"
-    # Configuration for the root disk: path /, uses 'default' storage pool, type disk
-    root_device_options = [
-        f"path=/",
-        f"pool=default", # Assumes a storage pool named 'default' exists.
-        f"type=disk"
-    ]
-
-    try:
-        logger.info(f"Attempting to add root disk device to profile '{profile_name}'.")
-        # Command to add a disk device to the profile
-        subprocess.run(
-            ["incus", "profile", "device", "add", profile_name, root_device_name, "disk"] + root_device_options,
-            check=True, # Will raise CalledProcessError on non-zero exit
-            capture_output=True, # Capture output for error messages
-            text=True # Decode output as text
-        )
-        logger.info(f"Successfully added root disk device to profile '{profile_name}'.")
     except subprocess.CalledProcessError as e:
         # Check if the error is because the root device already exists
         if "Device already exists" in e.stderr or "exists in profile" in e.stderr:
