@@ -966,21 +966,26 @@ def server_off(force=False):
             except FileNotFoundError:
                 pass # Already gone, no need to log an error
 
-    if server_process_found:
-        try:
-            if os.path.exists(ACTIVITY_FLAG):
-                os.remove(ACTIVITY_FLAG)
-                logger.info("Activity flag cleared.")
-            logger.info("PID file removed.")
-        except FileNotFoundError:
-            logger.info("No PID file found to remove.")
-    else:
-        logger.info("No active Meco server processes found.")
+    # Section 4: Final cleanup steps, regardless of PID status.
+    # This ensures profiles and bridges are always cleaned up at the end.
+    try:
+        if os.path.exists(ACTIVITY_FLAG):
+            os.remove(ACTIVITY_FLAG)
+            logger.info("Activity flag cleared.")
+    except FileNotFoundError:
+        pass
 
-    # -----------------------------------------------------------------
-    # Finally, when the daemon is going away for good, remove bridges.
-    # This runs whether or not --force was used (it’s safe & idempotent).
-    # -----------------------------------------------------------------
+
+
+    try:
+        subprocess.run(["incus", "profile", "delete", "meco-base"], check=True, capture_output=True, text=True)
+        subprocess.run(["incus", "profile", "delete", "meco-vm"], check=True, capture_output=True, text=True)
+        logger.info("Deleted Incus profiles: meco-base, meco-vm")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to delete Incus profiles: {e.stderr.strip()}")
+    except Exception as e:
+        logger.warning(f"Failed to delete Incus profiles: {e}")
+
     try:
         _teardown_bridges()
         logger.info("All bridges torn down.")
