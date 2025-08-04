@@ -92,17 +92,30 @@ def _setup_bridges():
             
 def _teardown_bridges():
     """
-    1) Flush and remove all ports from ovs-space & ovs-earth, then delete the ports
-    2) Delete the Linux dummy bridges dummy-space & dummy-earth
+    Tear down and remove Incus and OVS bridges.
+    - Deletes all OpenFlow rules.
+    - Removes all non-bridge ports from each OVS bridge.
+    - Deletes Incus network objects for each bridge.
     """
-    # 1) Cleanup OVS bridges: flows + ports
-    for ovs_br in ("ovs-space", "ovs-earth"):
-        # Remove all OpenFlow rules
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", ovs_br], check=False)
+    for br in ("incus-br-int", "incus-br-tun"):
+        # Remove all OpenFlow rules from the bridge.
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", br], check=False)
+         # List all ports on the bridge.
+        ports = subprocess.run(["sudo", "ovs-vsctl", "list-ports", br],
+                               capture_output=True, text=True, check=True).stdout.splitlines()
+        for p in ports:
+            if p == br:
+                continue    # Skip the bridge itself.
+            # Remove the port from OVS and delete the network device.
+            subprocess.run(["sudo", "ovs-vsctl", "--if-exists",
+                           "del-port", br, p], check=False)
+            subprocess.run(["sudo", "ip", "link", "del", p], check=False)
 
-        # List and remove all non-internal ports
-        ports = subprocess.run(
-            ["sudo", "ovs-vsctl", "list-ports", ovs_br],
+        # Remove the Incus network object.
+        subprocess.run(["sudo", "incus", "network", "delete", br],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info(f"Deleted Incus network object: {br}")
+
             capture_output=True,
             text=True,
             check=True,
