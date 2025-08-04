@@ -142,47 +142,109 @@ def _apply_openflow_rules(bridge: str, flows: List[str]):
         logger.error(f"An unexpected error occurred while applying flows: {e}")
         raise
 
+def _build_port_map():
+    """
+    Build a mapping from instance interface (instance_id:ethX) to OVS bridge and OpenFlow port number.
+    - Iterates over all running MECO instances.
+    - For each eth* interface, finds the OVS bridge and ofport.
+    - Returns a dictionary: { "<instance_id>:<iface_idx>": (bridge, ofport) }
+    """
+    port_map = {}
+    logger.info("Starting port mapping process...")
+
+    try:
+        # Get all Incus instances as JSON.
+        out = subprocess.run(
+            ["incus", "list", "--format=json"],
             capture_output=True,
             text=True,
             check=True,
-        ).stdout.splitlines()
+        ).stdout
+        instances = json.loads(out)
 
-        for p in ports:
-            if p == ovs_br:
+        # Filter to only running MECO instances.
+        meco_instances = [
+            inst for inst in instances
+            if inst.get("config", {}).get("user.meco") == "true"
+            and inst.get("status") == "Running"
+        ]
+
+        if not meco_instances:
+            logger.warning("No running MECO instances found.")
+            return port_map
+
+        for inst in meco_instances:
+            name = inst["name"]
+            instance_id = name.split('-')[0]    # Assumes convention: <id>-...
+
+            try:
+                # Get runtime state for the instance.
+                state_out = subprocess.run(
+                    ["incus", "query", f"/1.0/instances/{name}/state"],
+                    capture_output=True, text=True, check=True
+                ).stdout
+
+                state = json.loads(state_out)
+                network_info = state.get("network", {})
+
+                for iface_name, iface_data in network_info.items():
+                    # Only consider ethernet interfaces (eth*)
+                    if not iface_name.startswith("eth"):
+                        continue
+
+                    try:
+                        idx = int(iface_name.replace("eth", ""))
+                        host_dev = iface_data.get("host_name", "")
+                        if not host_dev:
+                            logger.warning(f"No host device found for {
+                                           name}.{iface_name}")
+                            continue
+
+                        logger.info(f"Found host device {
+                                    host_dev} for {name}.{iface_name}")
+
+                        # Get the OVS bridge this device is attached to.
+                        check_result = subprocess.run(
+                            ["sudo", "ovs-vsctl", "port-to-br", host_dev],
+                            capture_output=True, text=True, check=False
+                        )
+
+                        ovs_bridge = check_result.stdout.strip()
+                        if not ovs_bridge:
+                            logger.warning(
+                                f"{host_dev} is not attached to any OVS bridge. Ignoring.")
+                            continue
+
+                        # Get OpenFlow port number for the host device.
+                        port_num = subprocess.run(
+                            ["sudo", "ovs-vsctl", "get",
+                                "Interface", host_dev, "ofport"],
+                            capture_output=True, text=True, check=True
+                        ).stdout.strip()
+
+                        if port_num.isdigit():
+                            port_map[f"{instance_id}:{idx}"] = (
+                                ovs_bridge, int(port_num))
+                            logger.info(f"Mapped {instance_id}:{
+                                        idx} → {ovs_bridge}:{port_num}")
+                        else:
+                            logger.warning(f"Invalid port number for {
+                                           host_dev}: {port_num}")
+
+                    except Exception as e:
+                        logger.error(f"Error processing interface {
+                                     name}.{iface_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.error(f"Error processing instance {name}: {e}")
                 continue
-            subprocess.run(
-                ["sudo", "ovs-vsctl", "--if-exists", "del-port", ovs_br, p], check=False
-            )
-            subprocess.run(["sudo", "ip", "link", "del", p], check=False)
 
-    # 2) Delete the Incus network objects first.
-    #    This will also delete the underlying Linux bridges managed by Incus.
-    for net in ("dummy-space", "dummy-earth"):
-        try:
-            subprocess.run(["sudo", "incus", "network", "delete", net], check=True)
-            logger.info(f"Deleted Incus network object: {net}")
-        except subprocess.CalledProcessError as e:
-            err_msg = e.stderr.strip() if e.stderr is not None else str(e)
-            logger.warning(f"Failed to delete Incus network {net}: {err_msg}")
-            # If it failed, it might be because the network didn't exist or was in use,
-            # but we want to continue with other teardown steps if possible.
+    except Exception as e:
+        logger.error(f"Error building port map: {e}")
 
-    logger.info("All Incus networks and associated Linux bridges removed.")
-
-    # 3) Remove Linux dummy bridges (idempotent)
-    for br in ("dummy-space", "dummy-earth"):
-        subprocess.run(["sudo", "ip", "link", "del", br], check=False)
-
-    # 4) Remove OVS bridges (idempotent)
-    for br in ("ovs-space", "ovs-earth"):
-        subprocess.run(["sudo", "ovs-vsctl", "--if-exists", "del-br", br], check=False)
-
-    # Remove the meco-base profile (idempotent)
-    try:
-        subprocess.run(["incus", "profile", "delete", "meco-base"], check=True)
-        logger.info("Deleted Incus profile: meco-base")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to delete Incus profile 'meco-base': {e}")
+    logger.info(f"Port mapping complete. Mapped {len(port_map)} interfaces.")
+    return port_map
 
 
 class ServerColorFormatter(logging.Formatter):
