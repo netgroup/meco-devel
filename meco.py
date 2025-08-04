@@ -545,25 +545,14 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             with open(cloud_file, "w") as f:
                 f.write(cloud_yaml)
 
-            # 3) figure out how many data-plane NICs, and which dummy bridge
-            iface_defs = node.get("interfaces",
-                                type_map.get(node["type"], {}).get("interfaces", []))
-            bridge     = "dummy-earth" if node.get("altitude", 0) == 0 else "dummy-space"
+            # 3) get interfaces
+            iface_defs = node.get("interfaces", type_map.get(node["type"], {}).get("interfaces", []))
 
-            # 4) choose VM vs container, pick profile
-            profile = node["type"].lower()
-            if node["type"].lower() == "groundstation":
-                launcher = self._create_vm
-                profile_to_use = "meco-base"
-            else:
-                launcher = self._create_container
-                profile_to_use = "meco-base"
+            # 5) schedule launch
+            launcher = self._create_vm if node["type"].lower(
+            ) == "groundstation" else self._create_container
+            tasks.append(functools.partial(launcher, name, cloud_file, iface_defs, node_obj=node))
 
-            # 5) capture in our parallel task list (use functools.partial to avoid late binding bug)
-            tasks.append(functools.partial(launcher, name, profile_to_use, cloud_file, iface_defs, bridge, node_obj=node))
-            # Note: net_args is not used in the new _create_container/_create_vm methods, so passing an empty list.
-
-        # 6) launch in parallel
         max_workers = min(len(tasks), 32) or 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(t) for t in tasks]
