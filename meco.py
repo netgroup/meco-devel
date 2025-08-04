@@ -646,7 +646,7 @@ users:
             logger.info(f"Adding network device: {' '.join(device_args)}")
             subprocess.run(device_args, check=True, stdout=subprocess.DEVNULL)
 
-    def _create_vm(self, name: str, profile: str, cloud_file: str, iface_defs: list, bridge: str, node_obj: dict):
+    def _create_vm(self, name: str, cloud_file: str, iface_defs: List, node_obj: Dict):
         """Launch a VM with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
             logger.info(f"VM {name} exists, skipping.")
@@ -656,17 +656,22 @@ users:
         cmd = [
             "incus", "launch", "images:ubuntu/noble", name,
             "--vm",
-            "-p", profile,
+            "-p", "meco-vm",
             "-c", "user.meco=true",
             "-c", f"user.user-data=@{cloud_file}",
             "-c", f"user.meco.type={node_obj['type']}", 
             "-c", f"user.meco.altitude={node_obj['altitude']}", 
         ]
-        logger.info("Running: " + " ".join(cmd))
-        logger.info("DEBUG: Incus launch command list: %s" % cmd)
-        subprocess.run(cmd, check=True)
+        # Add network devices after launch
+        for iface_def in iface_defs:
+            cmd.extend(["--network", iface_def.get("network", "incus-br-int")])
 
-        if not self._wait_running(name, timeout=20):
+        logger.info("Running: " + " ".join(cmd))
+
+        # Execute the single, complete launch command
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+
+        if not self._wait_running(name, timeout=5):
             raise RuntimeError(f"{name} VM did not reach RUNNING")
 
         logger.info(f"{name} RUNNING")
