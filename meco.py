@@ -11,14 +11,13 @@ import grpc
 from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
-import uuid
 import subprocess
 from yaml import YAMLError
 import psutil  # For process checking
 from jsonschema import validate, ValidationError
 import json
-import re
 import functools
+from typing import List, Dict
 
 import meco_pb2
 import meco_pb2_grpc
@@ -81,15 +80,7 @@ def _setup_bridges():
             "nictype=bridged", "parent=incus-br-int"
         ], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
 
-    except subprocess.CalledProcessError as e:
-        # Check if the error is because the root device already exists
-        if "Device already exists" in e.stderr or "exists in profile" in e.stderr:
-            logger.debug(f"Root disk device already exists in profile '{profile_name}'. Skipping.")
-        else:
-            # If it's a different, unexpected error, log and re-raise it
-            logger.error(f"Failed to add root disk device to profile '{profile_name}': {e.stderr}")
-            raise # Re-raise the exception
-            
+
 def _teardown_bridges():
     """
     Tear down and remove Incus and OVS bridges.
@@ -116,6 +107,7 @@ def _teardown_bridges():
                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info(f"Deleted Incus network object: {br}")
 
+
 def _apply_openflow_rules(bridge: str, flows: List[str]):
     """
     Apply a set of OpenFlow rules to a given bridge.
@@ -141,6 +133,7 @@ def _apply_openflow_rules(bridge: str, flows: List[str]):
     except Exception as e:
         logger.error(f"An unexpected error occurred while applying flows: {e}")
         raise
+
 
 def _build_port_map():
     """
