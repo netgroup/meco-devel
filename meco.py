@@ -116,6 +116,32 @@ def _teardown_bridges():
                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         logger.info(f"Deleted Incus network object: {br}")
 
+def _apply_openflow_rules(bridge: str, flows: List[str]):
+    """
+    Apply a set of OpenFlow rules to a given bridge.
+    - Clears any existing flows before applying new ones.
+    - Logs each flow addition.
+    - Raises/logs errors as needed.
+    """
+    logger.info(f"Applying OpenFlow rules to bridge {bridge}...")
+    try:
+        # Delete all existing OpenFlow rules.
+        subprocess.run(["sudo", "ovs-ofctl", "del-flows", bridge], check=False)
+        logger.info(f"Cleared existing flows from bridge {bridge}.")
+
+        # Apply each flow rule.
+        for rule in flows:
+            subprocess.run(["sudo", "ovs-ofctl", "add-flow",
+                           bridge, rule], check=True)
+            logger.info(f"OF rule added: {rule}")
+        logger.info("All flows installed successfully.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to apply OpenFlow rules: {e.stderr.strip()}")
+        raise
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while applying flows: {e}")
+        raise
+
             capture_output=True,
             text=True,
             check=True,
