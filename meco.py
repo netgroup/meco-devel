@@ -1482,7 +1482,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         # Or remove the 'passwd' line if you only rely on SSH keys.
         passwd_hash = node.get(
             "passwd_hash",
-            "$6$rounds=4096$mecosalt$mecoP4ssw0rdH4sh" # Replace with a real hash or remove
+            "$6$rounds=4096$mecosalt$mecoP4ssw0rdH4sh",  # Replace with a real hash or remove
         )
         return f"""#cloud-config
 package_update: true
@@ -1831,6 +1831,7 @@ def server_off(force=False):
 
     if not os.path.exists(PID_LIST_FILE):
         logger.info("No recorded Meco server PIDs found.")
+        return
     else:
         killed_pids: List[int] = []
         pids: List[int] = []
