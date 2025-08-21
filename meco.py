@@ -822,6 +822,47 @@ def _get_instance_network_state(instance_name: str):
     return {}
 
 
+def _wait_for_ipv4_addresses(
+    topo: dict, timeout: int = 120, poll_interval: int = 3
+) -> dict[str, tuple[str, int]]:
+    """
+    Waits for all declared nodes to obtain an IPv4 address and builds the port map.
+
+    Args:
+        topo: The topology dictionary.
+        timeout: Maximum time to wait in seconds.
+        poll_interval: Time to wait between checks in seconds.
+
+    Returns:
+        A dictionary mapping instance_id:interface_index to (ovs_bridge, ovs_port_number).
+        Returns an empty dict if timeout is reached before all IPs are found.
+    """
+    logger.info("[Flows] Waiting for IPv4 addresses to build adjacency flows...")
+
+    start_time = time.time()
+    expected = len(topo.get("nodes", []))
+    port_map: dict[str, tuple[str, int]] = {}
+
+    while time.time() - start_time < timeout:
+        port_map = _build_port_map()
+        got = len(port_map)
+        logger.info(
+            f"[Flows] Port map progress {got}/{expected} (elapsed {time.time() - start_time:.1f}s)"
+        )
+        if got >= expected:
+            logger.info("[Flows] All expected IPv4 addresses acquired.")
+            break
+        time.sleep(poll_interval)
+    else:
+        logger.error(
+            f"[Flows] Timeout after {timeout}s waiting for IPv4 mappings; proceeding with {len(port_map)} of {expected} (some links may be skipped)."
+        )
+
+    if not port_map:
+        logger.error("[Flows] Empty port map; aborting flow installation.")
+    return port_map
+
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
