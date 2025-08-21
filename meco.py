@@ -948,6 +948,26 @@ def _build_adjacency_map(
     return dict(adjacency)  # Convert from defaultdict for cleaner return
 
 
+def _generate_arp_rules(all_ports: list[int]) -> list[str]:
+    """
+    Generates ARP broadcast rules to help neighbours learn MAC addresses.
+
+    Args:
+        all_ports: A list of unique OpenFlow port numbers involved in the topology.
+
+    Returns:
+        A list of OpenFlow rule strings for ARP handling. Empty if not needed.
+    """
+    arp_flows = []
+    # Optional ARP broadcast across all participating ports
+    # Only add if there are multiple ports to connect
+    if len(all_ports) > 1:
+        arp_actions = ",".join(f"output:{p}" for p in all_ports)
+        # Higher priority than forwarding rules
+        arp_flows.append(f"priority=150,arp,actions={arp_actions}")
+        logger.debug(f"[Flows] Generated ARP broadcast rule for ports {all_ports}")
+    return arp_flows
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
