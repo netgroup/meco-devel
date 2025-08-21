@@ -1191,11 +1191,53 @@ UPLOADS_DIR = "/tmp/meco_uploads"  # Stores received files
 PID_LIST_FILE = "/tmp/meco_pids.txt"  # File to track active Meco PIDs
 ACTIVITY_FLAG = "/tmp/meco_activity.flag"
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.yaml")
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+DEFAULT_CONFIG = {
+    "defaults": {
+        "ovs_bridge_internal": "br-int",
+        "ovs_bridge_tunnel": "br-tun",
+        "profile_base_container": "meco-cnt",
+        "profile_base_vm": "meco-vm",
+        "interface_internal": "br-int",
+        "interface_tunnel": "br-tun",
+        "storage_pool": "sshfs-pool",
+        "dns_mode": "dynamic",
+        "bridge_driver": "openvswitch",
+        "image_container": "images:ubuntu/22.04",
+        "image_vm": "images:ubuntu/noble",
+    }
+}
 
 
 def load_schema():
     with open(SCHEMA_PATH, "r") as f:
         return yaml.safe_load(f)
+
+
+def load_config(config_path=CONFIG_PATH, default_config=DEFAULT_CONFIG):
+    """Loads configuration from a YAML file, falling back to defaults."""
+    config = default_config.copy()  # Start with defaults
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r") as f:
+                file_config = yaml.safe_load(f) or {}  # Handle empty file
+            # Deep merge or simple update for top-level keys like 'defaults'
+            # This simple update replaces the entire 'defaults' dict if present in file
+            config.update(file_config)
+            logger.info(f"Configuration loaded from {config_path}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to load config from {config_path}: {e}. Using defaults."
+            )
+    else:
+        logger.info(
+            f"Config file {config_path} not found. Using default configuration."
+        )
+    return config
+
+
+CONFIG = load_config()
+CONFIG_DEFAULTS = CONFIG.get("defaults", DEFAULT_CONFIG["defaults"])
 
 
 class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
