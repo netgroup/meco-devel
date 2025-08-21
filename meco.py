@@ -789,6 +789,39 @@ def _apply_openflow_rules(bridge: str, flows: list[str]):
         logger.error(f"Failed to apply OpenFlow rules to {bridge}: {e}")
         raise
 
+
+def _get_instance_network_state(instance_name: str):
+    """
+    Fetches the network state information for a specific Incus instance.
+
+    Args:
+        instance_name (str): The name of the Incus instance.
+
+    Returns:
+        dict: The 'network' section of the instance's state, or an empty dict on error.
+    """
+    try:
+        result = run_command(
+            ["incus", "query", f"/1.0/instances/{instance_name}/state"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        state_info = json.loads(result.stdout)
+        return state_info.get("network", {})
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Error querying state for instance {instance_name}: {e.stderr.strip()}"
+        )
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing state JSON for instance {instance_name}: {e}")
+    except Exception as e:
+        logger.error(
+            f"Unexpected error getting network state for instance {instance_name}: {e}"
+        )
+    return {}
+
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
