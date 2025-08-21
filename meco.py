@@ -1355,7 +1355,9 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
 
                 # Mark activity
                 with open(ACTIVITY_FLAG, "w") as f:
-                    activity_file_name = request.save_as if request.save_as else "last_emulation.yaml"
+                    activity_file_name = (
+                        request.save_as if request.save_as else "last_emulation.yaml"
+                    )
                     f.write(activity_file_name)
 
                 # Install initial flows
@@ -1444,12 +1446,19 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
                 f.write(cloud_yaml)
 
             # 3) get interfaces
-            iface_defs = node.get("interfaces", type_map.get(node["type"], {}).get("interfaces", []))
+            iface_defs = node.get(
+                "interfaces", type_map.get(node["type"], {}).get("interfaces", [])
+            )
 
             # 5) schedule launch
-            launcher = self._create_vm if node["type"].lower(
-            ) == "groundstation" else self._create_container
-            tasks.append(functools.partial(launcher, name, cloud_file, iface_defs, node_obj=node))
+            launcher = (
+                self._create_vm
+                if node["type"].lower() == "groundstation"
+                else self._create_container
+            )
+            tasks.append(
+                functools.partial(launcher, name, cloud_file, iface_defs, node_obj=node)
+            )
 
         max_workers = min(len(tasks), 32) or 1
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1786,14 +1795,14 @@ def server_off(force=False):
                         os.kill(pid, signal.SIGTERM)
                     except OSError as e:
                         logger.error(f"Error sending SIGTERM to PID {pid}: {e}")
-                    
+
                     # 2. Wait for the process to terminate
                     timeout = 5
                     for _ in range(timeout):
                         if not psutil.pid_exists(pid):
                             break
                         time.sleep(1)
-                    
+
                     # 3. If still running, send SIGKILL to force termination
                     if psutil.pid_exists(pid):
                         logger.warning(
@@ -1803,7 +1812,7 @@ def server_off(force=False):
                             os.kill(pid, signal.SIGKILL)
                         except OSError as e:
                             logger.error(f"Error sending SIGKILL to PID {pid}: {e}")
-                    
+
                     if not psutil.pid_exists(pid):
                         killed_pids.append(pid)
         else:
@@ -1815,13 +1824,17 @@ def server_off(force=False):
         if remaining_pids:
             with open(PID_LIST_FILE, "w") as f:
                 f.write("\n".join(remaining_pids) + "\n")
-            logger.info(f"PID list file updated. {len(remaining_pids)} processes remain.")
+            logger.info(
+                f"PID list file updated. {len(remaining_pids)} processes remain."
+            )
         else:
             try:
                 os.remove(PID_LIST_FILE)
-                logger.info("All Meco server processes were stopped. PID list file removed.")
+                logger.info(
+                    "All Meco server processes were stopped. PID list file removed."
+                )
             except FileNotFoundError:
-                pass # Already gone, no need to log an error
+                pass  # Already gone, no need to log an error
 
     # Section 4: Final cleanup steps, regardless of PID status.
     # This ensures profiles and bridges are always cleaned up at the end.
@@ -1846,7 +1859,7 @@ def server_off(force=False):
         logger.warning(f"Failed to delete Incus profiles: {e}")
 
     try:
-        _teardown_bridges()
+        _teardown_bridges()  # This function now uses CONFIG_DEFAULTS
         logger.info("All bridges torn down.")
     except Exception as e:
         logger.warning(f"Failed to clean up bridges: {e}")
