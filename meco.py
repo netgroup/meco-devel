@@ -1569,34 +1569,62 @@ users:
         #     logger.info(f"Adding network device: {' '.join(device_args)}")
         #     run_command(device_args, check=True)
 
-    def _create_vm(self, name: str, cloud_file: str, iface_defs: List, node_obj: Dict):
+    def _create_vm(self, name: str, cloud_file: str, iface_defs: list, node_obj: dict):
         """Launch a VM with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
             logger.info(f"VM {name} exists, skipping.")
             return
-        
-        # Launch the VM with the base profile and cloud-init only
+
+        # Use configured names
+        profile_vm = CONFIG_DEFAULTS["profile_base_vm"]
+        # ovs_bridge_tunnel = CONFIG_DEFAULTS["ovs_bridge_tunnel"] # Not used directly in launch for VMs in original
+        # ovs_bridge_internal = CONFIG_DEFAULTS["ovs_bridge_internal"]
+        image_vm = CONFIG_DEFAULTS["image_vm"]
+
         cmd = [
-            "incus", "launch", "images:ubuntu/noble", name,
+            "incus",
+            "launch",
+            image_vm,
+            name,
             "--vm",
-            "-p", "meco-vm",
-            "-c", "user.meco=true",
-            "-c", f"user.user-data=@{cloud_file}",
-            "-c", f"user.meco.type={node_obj['type']}", 
-            "-c", f"user.meco.altitude={node_obj['altitude']}", 
+            "-p",
+            profile_vm,
+            # "--network", ovs_bridge_internal, # Use configured internal network
+            # "--network", ovs_bridge_tunnel, # Use configured internal network
+            "-c",
+            "user.meco=true",
+            "-c",
+            f"user.user-data=@{cloud_file}",
+            "-c",
+            f"user.meco.type={node_obj['type']}",
+            "-c",
+            f"user.meco.altitude={node_obj['altitude']}",
         ]
-        # Add network devices after launch
-        for iface_def in iface_defs:
-            cmd.extend(["--network", iface_def.get("network", "incus-br-int")])
+        # For VMs, rely on the 'meco-vm' profile to provide the primary NIC (eth1).
+        # The profile already attaches it to the internal bridge (br-int).
+        # Adding --network here based on iface_defs causes conflicts by creating
+        # additional interfaces (eth0, eth2, etc.) also attached to br-int.
+        # If specific network attachments beyond the profile are needed,
+        # they should be added as devices post-launch, similar to containers with >1 iface.
+        # For now, we assume the profile provides the primary connection.
+        # If iface_defs indicates a need for more interfaces, they can be added later.
+        # Example for adding a second interface post-launch if needed:
+        # if len(iface_defs) > 1:
+        #     for i in range(1, len(iface_defs)):
+        #         network_name = iface_defs[i].get("network", CONFIG_DEFAULTS["ovs_bridge_internal"])
+        #         device_args = [
+        #             "incus", "config", "device", "add", name, f"eth{i+1}", # eth2, eth3, ...
+        #             "nic", f"network={network_name}"
+        #         ]
+        #         logger.info(f"Adding extra network device: {' '.join(device_args)}")
+        #         run_command(device_args, check=True)
+        pass  # Placeholder, remove this line if adding the conditional code above
 
         logger.info("Running: " + " ".join(cmd))
-
-        # Execute the single, complete launch command
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
-
+        run_command(cmd, check=True)
+        # Note: Original had timeout=5 for VM, which seems very short. Keeping it for now.
         if not self._wait_running(name, timeout=5):
             raise RuntimeError(f"{name} VM did not reach RUNNING")
-
         logger.info(f"{name} RUNNING")
 
     def _install_initial_flows(self, topo):
