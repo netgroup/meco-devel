@@ -1501,14 +1501,28 @@ users:
     ssh_authorized_keys: []
     sudo: ALL=(ALL) NOPASSWD:ALL
 """
-    
-    def _instance_exists(self, name):
-        result = subprocess.run(
-            ["incus", "list", "--format=json"], capture_output=True, text=True
-        )
-        return name in result.stdout
 
-    def _create_container(self, name: str, cloud_file: str, iface_defs: List, node_obj: Dict):
+    def _instance_exists(self, name):
+        """Checks if an Incus instance with the given name exists and is running."""
+        try:
+            result = run_command(
+                ["incus", "list", "--format=json"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            instances = json.loads(result.stdout)
+            for inst in instances:
+                if inst["name"] == name and inst["status"] == "Running":
+                    return True
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Error checking instance {name}: {e.stderr.strip()}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Error parsing Incus list JSON output: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error checking instance {name}: {e}")
+        return False
+
         """Launch a container with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
             logger.info(f"Container {name} exists, skipping.")
