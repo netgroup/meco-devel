@@ -887,6 +887,67 @@ def _collect_topology_links(topo: dict) -> list[tuple[int, int]]:
     return links
 
 
+def _build_adjacency_map(
+    links: list[tuple[int, int]],
+    port_map: dict[str, tuple[str, int]],
+    managed_bridges: set[str],
+) -> dict[str, dict[int, set[int]]]:
+    """
+    Builds an adjacency list representing connections per OVS bridge based on topology links and port mappings.
+
+    Args:
+        links: List of (source_id, destination_id) tuples.
+        port_map: Dictionary mapping instance_id:interface_index to (ovs_bridge, ovs_port_number).
+        managed_bridges: Set of bridge names that are managed by this system.
+
+    Returns:
+        A dictionary: {bridge_name: {ofport: {neighbour_ofport, ...}}}.
+        Returns an empty dict if no valid connections are found.
+    """
+    from collections import defaultdict
+
+    # adjacency[bridge][ofport] -> set(ofport, ...)
+    adjacency: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+
+    def port_key(node_id: int) -> str:
+        # Assuming eth0 (index 0) is the primary interface for all nodes
+        return f"{node_id}:0"
+
+    for a, b in links:
+        a_key = port_key(a)
+        b_key = port_key(b)
+        a_info = port_map.get(a_key)
+        b_info = port_map.get(b_key)
+        if not a_info or not b_info:
+            logger.warning(
+                f"[Flows] Skipping link {a_key}<->{b_key}: missing port mapping."
+            )
+            continue
+
+        a_br, a_port = a_info
+        b_br, b_port = b_info
+
+        if a_br != b_br:
+            logger.warning(
+                f"[Flows] Link {a_key}<->{b_key} spans different bridges ({a_br}!={b_br}); skipping."
+            )
+            continue
+        if a_br not in managed_bridges:
+            logger.warning(
+                f"[Flows] Bridge {a_br} for link {a_key}<->{b_key} not managed; skipping."
+            )
+            continue
+        # Add both directions (undirected graph)
+        # Prevent self-loop connections on the same port
+        if a_port != b_port:
+            adjacency[a_br][a_port].add(b_port)
+            adjacency[a_br][b_port].add(a_port)
+
+    if not adjacency:
+        logger.error("[Flows] Built empty adjacency map; no valid connections found.")
+    return dict(adjacency)  # Convert from defaultdict for cleaner return
+
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
