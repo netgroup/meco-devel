@@ -571,65 +571,80 @@ def delete_meco_instances(force: bool = True):
                 results[nm] = False
     return results
 
-            return port_map
 
-        for inst in meco_instances:
-            name = inst["name"]
-            instance_id = name.split('-')[0]    # Assumes convention: <id>-...
+# --- OVS Specific Operations ---
 
-            try:
-                # Get runtime state for the instance.
-                state_out = subprocess.run(
-                    ["incus", "query", f"/1.0/instances/{name}/state"],
-                    capture_output=True, text=True, check=True
-                ).stdout
 
-                state = json.loads(state_out)
-                network_info = state.get("network", {})
+def ovs_del_flows(bridge: str) -> bool:
+    """Deletes all flows from an OVS bridge."""
+    cmd = ["sudo", "ovs-ofctl", "del-flows", bridge]
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Cleared flows from OVS bridge: {bridge}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to delete flows from bridge {bridge}: {e.stderr.strip()}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error deleting flows from bridge {bridge}: {e}")
+        return False
 
-                for iface_name, iface_data in network_info.items():
-                    # Only consider ethernet interfaces (eth*)
-                    if not iface_name.startswith("eth"):
-                        continue
 
-                    try:
-                        idx = int(iface_name.replace("eth", ""))
-                        host_dev = iface_data.get("host_name", "")
-                        if not host_dev:
-                            logger.warning(f"No host device found for {
-                                           name}.{iface_name}")
-                            continue
+def ovs_add_flow(bridge: str, flow_rule: str) -> bool:
+    """Adds a flow rule to an OVS bridge."""
+    cmd = ["sudo", "ovs-ofctl", "add-flow", bridge, flow_rule]
+    # --- Add this debug line ---
+    logger.debug(f"Executing OVS command: {' '.join(cmd)}")
+    # --- End of addition ---
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Added flow rule to {bridge}: {flow_rule}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Failed to add flow rule to {bridge} ({flow_rule}): {e.stderr.strip()}"
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            f"Unexpected error adding flow rule to {bridge} ({flow_rule}): {e}"
+        )
+        return False
 
-                        logger.info(f"Found host device {
-                                    host_dev} for {name}.{iface_name}")
 
-                        # Get the OVS bridge this device is attached to.
-                        check_result = subprocess.run(
-                            ["sudo", "ovs-vsctl", "port-to-br", host_dev],
-                            capture_output=True, text=True, check=False
-                        )
+def ovs_list_ports(bridge: str) -> list[str]:
+    """Lists ports on an OVS bridge."""
+    cmd = ["sudo", "ovs-vsctl", "list-ports", bridge]
+    try:
+        result = run_command(cmd, capture_output=True)
+        ports = result.stdout.strip().splitlines()
+        logger.debug(f"Ports on OVS bridge {bridge}: {ports}")
+        return ports
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to list ports on bridge {bridge}: {e.stderr.strip()}")
+    except Exception as e:
+        logger.error(f"Unexpected error listing ports on bridge {bridge}: {e}")
+    return []
 
-                        ovs_bridge = check_result.stdout.strip()
-                        if not ovs_bridge:
-                            logger.warning(
-                                f"{host_dev} is not attached to any OVS bridge. Ignoring.")
-                            continue
 
-                        # Get OpenFlow port number for the host device.
-                        port_num = subprocess.run(
-                            ["sudo", "ovs-vsctl", "get",
-                                "Interface", host_dev, "ofport"],
-                            capture_output=True, text=True, check=True
-                        ).stdout.strip()
+def ovs_del_port(bridge: str, port: str) -> bool:
+    """Deletes a port from an OVS bridge."""
+    cmd = ["sudo", "ovs-vsctl", "--if-exists", "del-port", bridge, port]
+    try:
+        # --if-exists makes it succeed even if port doesn't exist, so check=True is usually fine
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Deleted port {port} from OVS bridge {bridge}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Failed to delete port {port} from bridge {bridge}: {e.stderr.strip()}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error deleting port {port} from bridge {bridge}: {e}")
+        return False
 
-                        if port_num.isdigit():
-                            port_map[f"{instance_id}:{idx}"] = (
-                                ovs_bridge, int(port_num))
-                            logger.info(f"Mapped {instance_id}:{
-                                        idx} → {ovs_bridge}:{port_num}")
-                        else:
-                            logger.warning(f"Invalid port number for {
-                                           host_dev}: {port_num}")
+
 
                     except Exception as e:
                         logger.error(f"Error processing interface {
