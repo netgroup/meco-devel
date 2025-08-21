@@ -997,6 +997,100 @@ def _generate_forwarding_rules(neigh_map: dict[int, set[int]]) -> list[str]:
         )
     return forwarding_flows
 
+
+# --- Refactored _process_interface to use helper functions ---
+def _process_interface(
+    instance_name: str, instance_id: str, iface_name: str, iface_data: dict
+):
+    """
+    Processes a single interface's data from Incus state.
+    Returns (ovs_bridge, ovs_port) tuple if successful and IPv4 is found, otherwise None.
+    """
+    # Validate basic structure
+    if not isinstance(iface_data, dict) or not iface_name or not instance_id:
+        logger.warning(
+            f"Invalid data for _process_interface: name={instance_name}, id={instance_id}, iface={iface_name}"
+        )
+        return None
+
+    # 1. Filter for ethX interfaces (as in original logic)
+    if not iface_name.startswith("eth"):
+        logger.debug(f"Skipping non-eth interface {instance_name}.{iface_name}")
+        return None
+
+    # 2. Extract interface index from name (e.g., eth0 -> 0)
+    idx_match = re.search(r"\d+", iface_name)
+    if idx_match:
+        idx = int(idx_match.group())
+    else:
+        logger.warning(
+            f"Could not extract numerical index from interface name {instance_name}.{iface_name}"
+        )
+        return None
+
+    # 3. Extract host interface name (tap device)
+    host_dev = iface_data.get("host_name", "")
+    if not host_dev:
+        logger.warning(f"No host device found for {instance_name}.{iface_name}")
+        return None
+    logger.debug(f"Found host device {host_dev} for {instance_name}.{iface_name}")
+
+    # 4. --- CRITICAL CHANGE: Check for IPv4 address ---
+    ipv4_address = None
+    for addr_info in iface_data.get("addresses", []):
+        if addr_info.get("family") == "inet":  # Look for IPv4 ('inet')
+            ipv4_address = addr_info.get("address")
+            break
+
+    if not ipv4_address:
+        logger.debug(
+            f"Skipping interface {iface_name} for instance {instance_name} (ID: {instance_id}) - No IPv4 address found yet."
+        )
+        # Return None to indicate this interface isn't ready for mapping
+        return None
+
+    logger.debug(f"Found IPv4 address {ipv4_address} for {instance_name}.{iface_name}")
+    # --- End of IPv4 check ---
+
+    # 5. Find the corresponding OVS bridge using the helper function
+    try:
+        ovs_bridge = ovs_port_to_br(host_dev)
+        if not ovs_bridge:
+            logger.warning(
+                f"{host_dev} (for {instance_name}.{iface_name}) is not attached to any OVS bridge. Ignoring."
+            )
+            return None
+    except Exception as e:  # Catch exceptions from ovs_port_to_br
+        logger.error(
+            f"Error finding OVS bridge for {host_dev} (for {instance_name}.{iface_name}): {e}"
+        )
+        return None
+
+    # 6. Find the OpenFlow port number using the helper function
+    try:
+        port_num = ovs_get_interface_ofport(host_dev)
+        # Validate port number (handle potential negative values like -1 for internal ports)
+        # 0 is a valid port number for the local interface
+        if port_num is not None and port_num >= 0:
+            # Valid port number found
+            pass
+        else:
+            logger.warning(
+                f"Invalid port number ({port_num}) for {host_dev} (for {instance_name}.{iface_name})"
+            )
+            return None
+    except Exception as e:  # Catch exceptions from ovs_get_interface_ofport
+        logger.error(
+            f"Error getting ofport for {host_dev} (for {instance_name}.{iface_name}): {e}"
+        )
+        return None
+
+    # 7. Return successful mapping (key, value) tuple as expected by _build_port_map
+    port_key = f"{instance_id}:{idx}"
+    port_value = (ovs_bridge, port_num)
+    logger.info(f"Mapped {port_key} -> {ovs_bridge}:{port_num} (IPv4: {ipv4_address})")
+    return (port_key, port_value)
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
