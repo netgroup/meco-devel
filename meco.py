@@ -968,6 +968,35 @@ def _generate_arp_rules(all_ports: list[int]) -> list[str]:
         logger.debug(f"[Flows] Generated ARP broadcast rule for ports {all_ports}")
     return arp_flows
 
+
+def _generate_forwarding_rules(neigh_map: dict[int, set[int]]) -> list[str]:
+    """
+    Generates the main multi-output forwarding rules based on the adjacency map.
+
+    Args:
+        neigh_map: A dictionary mapping an input port to its set of neighbour output ports
+                for a specific bridge ({in_port: {out_port1, out_port2, ...}}).
+
+    Returns:
+        A list of OpenFlow rule strings for forwarding.
+    """
+    forwarding_flows = []
+    # Per-port multi-output rules
+    for in_p, outs in neigh_map.items():
+        if (
+            not outs
+        ):  # Should not happen if adjacency is built correctly, but check anyway
+            logger.debug(f"[Flows] Skipping in_port {in_p} with no neighbours.")
+            continue
+        # Deterministic ordering for reproducibility
+        out_list = sorted(outs)
+        actions = ",".join(f"output:{p}" for p in out_list)
+        forwarding_flows.append(f"priority=100,in_port={in_p},actions={actions}")
+        logger.debug(
+            f"[Flows] Generated forwarding rule: in_port={in_p} -> outputs={out_list}"
+        )
+    return forwarding_flows
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
