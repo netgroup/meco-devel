@@ -694,6 +694,48 @@ def ovs_get_interface_ofport(interface: str) -> int | None:
     return None
 
 
+# --- Refactored _setup_bridges using the new functions ---
+
+
+def _setup_bridges():
+    """
+    Sets up the core MECO infrastructure: OVS bridges/networks and base profiles.
+    Uses configuration for names.
+    """
+    bridges_created = True
+    profiles_setup = True
+
+    try:
+        # Use configured bridge names
+        bridge_internal = CONFIG_DEFAULTS["ovs_bridge_internal"]
+        bridge_tunnel = CONFIG_DEFAULTS["ovs_bridge_tunnel"]
+
+        # 1) Create two managed Incus networks with OVS driver
+        logger.info("Creating MECO Incus networks (OVS bridges)...")
+        for net in (bridge_internal, bridge_tunnel):
+            if not incus_create_network(net):
+                bridges_created = False
+
+        if not bridges_created:
+            logger.error("Failed to create one or more Incus networks (OVS bridges).")
+            raise RuntimeError(
+                "Failed to create required Incus networks (OVS bridges)."
+            )
+
+        # 2) Ensure 'meco-base' and 'meco-vm' Incus profiles exist and are configured
+        logger.info("Setting up MECO base profiles...")
+        profiles_setup = setup_meco_base_profiles()
+
+        if profiles_setup:
+            logger.info("Bridges and base profiles initialized successfully.")
+        else:
+            logger.error("Bridge creation succeeded, but profile setup had errors.")
+
+    except Exception as e:
+        logger.error(f"Critical error during _setup_bridges: {e}")
+        raise
+
+
 
     except Exception as e:
         logger.error(f"Error building port map: {e}")
