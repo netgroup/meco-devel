@@ -18,7 +18,7 @@ from jsonschema import validate, ValidationError
 import json
 import functools
 from typing import List, Dict
-
+import re
 import meco_pb2
 import meco_pb2_grpc
 
@@ -33,55 +33,62 @@ class LogColors:
     GRAY = "\033[90m"
 
 
-def _setup_bridges():
+# --- Centralized Subprocess Execution ---
+
+
+def run_command(
+    cmd,
+    check=True,
+    capture_output=True,
+    text=True,
+    shell=False,
+    log_level=logging.DEBUG,
+):
     """
-    Create necessary Incus networks and set up profiles for containers and VMs.
-    - Creates two OVS-backed Incus bridges: 'incus-br-int' and 'incus-br-tun'.
-    - Sets up or updates the 'meco-base' profile for containers and 'meco-vm' for VMs.
-    - Ensures 'eth0' in each profile is bridged to 'incus-br-int'.
+    Executes a shell command using subprocess.run with standardized options.
+
+    Args:
+        cmd (list or str): The command and its arguments as a list, or a string if shell=True.
+        check (bool): If True, raises CalledProcessError on non-zero exit code. Defaults to True.
+        capture_output (bool): If True, captures stdout and stderr. Defaults to True.
+        text (bool): If True, returns output as strings. Defaults to True.
+        shell (bool): If True, command is executed through the shell. Use cautiously. Defaults to False.
+        log_level (int): The logging level for debug messages (e.g., logging.DEBUG). Defaults to DEBUG.
+
+    Returns:
+        subprocess.CompletedProcess: The result of the command execution.
+
+    Raises:
+        subprocess.CalledProcessError: If check=True and the command fails.
+        Exception: For other unexpected errors during execution.
     """
-    # Create the required Incus networks using Open vSwitch backend.
-    for net in ("incus-br-int", "incus-br-tun"):
-        subprocess.run([
-            "sudo", "incus", "network", "create", net,
-            "--type=bridge",
-            "bridge.driver=openvswitch",
-            "dns.mode=none"
-        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info(f"Incus network '{net}' created")
+    try:
+        # Execute the command
+        result = subprocess.run(
+            cmd, check=check, capture_output=capture_output, text=text, shell=shell
+        )
 
-    # Ensure the 'meco-base' profile exists for containers.
-    profile_container = "meco-base"
-    profiles = subprocess.run(["incus", "profile", "list", "--format=csv"],
-                              capture_output=True, text=True).stdout.splitlines()
-    existing = {p.split(',')[0] for p in profiles}
-    if profile_container not in existing:
-        subprocess.run(["incus", "profile", "create",
-                       profile_container], check=True, stdout=subprocess.DEVNULL)
-        
-    # Ensure root disk device is present, replace or add 'eth0' bridged to incus-br-int.
-    root_opts = ["path=/", "pool=sshfs-pool", "type=disk"]
-    subprocess.run(["incus", "profile", "device", "add", profile_container,
-                   "root", "disk"] + root_opts, check=False,stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["incus", "profile", "device", "remove",
-                   profile_container, "eth0"], check=False,stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["incus", "profile", "device", "add", profile_container, "eth0", "nic", "nictype=bridged",
-                   "parent=incus-br-int"], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
-    logger.info(
-        f"Profile '{profile_container}' configured with eth0 -> incus-br-int.")
+        # Log output if captured and at appropriate level
+        if capture_output and log_level <= logging.INFO:
+            if result.stderr:
+                # Log stderr, potentially at WARNING or ERROR level depending on check/result
+                logger.log(
+                    logging.WARNING if result.returncode == 0 else logging.ERROR,
+                    f"Command stderr: {result.stderr.strip()}",
+                )
 
-    # Create 'meco-vm' profile for VMs by copying from 'meco-base', add eth1 bridged to incus-br-int.
-    profile_vm = "meco-vm"
-    if profile_vm not in existing:
-        subprocess.run(["incus", "profile", "copy",
-                       profile_container, profile_vm], check=True)
-        subprocess.run([
-            "incus", "profile", "device", "add", profile_vm, "eth1", "nic",
-            "nictype=bridged", "parent=incus-br-int"
-        ], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        return result
+
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed with exit code {e.returncode}: {e.cmd}")
+        if e.stderr:
+            logger.error(f"Command stderr: {e.stderr.strip()}")
+        raise  # Re-raise the exception
+    except Exception as e:
+        logger.error(f"Unexpected error running command {cmd}: {e}")
+        raise  # Re-raise the exception
 
 
-def _teardown_bridges():
     """
     Tear down and remove Incus and OVS bridges.
     - Deletes all OpenFlow rules.
