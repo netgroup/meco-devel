@@ -645,15 +645,55 @@ def ovs_del_port(bridge: str, port: str) -> bool:
         return False
 
 
+def ovs_port_to_br(port: str) -> str | None:
+    """Gets the bridge a port is attached to."""
+    cmd = ["sudo", "ovs-vsctl", "port-to-br", port]
+    try:
+        result = run_command(
+            cmd, check=False, capture_output=True
+        )  # check=False in case port isn't attached
+        bridge = result.stdout.strip()
+        if bridge:
+            logger.debug(f"Port {port} is attached to bridge {bridge}")
+            return bridge
+        else:
+            logger.debug(f"Port {port} is not attached to any OVS bridge.")
+            return None
+    except subprocess.CalledProcessError as e:
+        # Likely means port doesn't exist or isn't managed by OVS
+        logger.debug(
+            f"Port {port} not found in OVS or error checking: {e.stderr.strip()}"
+        )
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error checking bridge for port {port}: {e}")
+        return None
 
-                    except Exception as e:
-                        logger.error(f"Error processing interface {
-                                     name}.{iface_name}: {e}")
-                        continue
 
-            except Exception as e:
-                logger.error(f"Error processing instance {name}: {e}")
-                continue
+def ovs_get_interface_ofport(interface: str) -> int | None:
+    """Gets the OpenFlow port number for an OVS interface."""
+    cmd = ["sudo", "ovs-vsctl", "get", "Interface", interface, "ofport"]
+    try:
+        result = run_command(cmd, capture_output=True)
+        port_str = result.stdout.strip()
+        if port_str.isdigit():
+            port_num = int(port_str)
+            logger.debug(f"OVS interface {interface} has ofport {port_num}")
+            return port_num
+        else:
+            logger.warning(
+                f"Invalid port number for OVS interface {interface}: {port_str}"
+            )
+            return None
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Failed to get ofport for interface {interface}: {e.stderr.strip()}"
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error getting ofport for interface {interface}: {e}")
+    return None
+
+
 
     except Exception as e:
         logger.error(f"Error building port map: {e}")
