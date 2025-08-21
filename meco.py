@@ -1091,10 +1091,74 @@ def _process_interface(
     logger.info(f"Mapped {port_key} -> {ovs_bridge}:{port_num} (IPv4: {ipv4_address})")
     return (port_key, port_value)
 
+
+def _build_port_map():
+    """
+    Builds a mapping of instance_id:interface_index -> (ovs_bridge, ovs_port_number)
+    Only includes interfaces that have successfully acquired an IPv4 address.
+    """
+    port_map = {}
+    logger.info("Starting port mapping process (filtering for IPv4)...")
+
+    try:
+        # 1. Get the list of running MECO instances
+        meco_instances = _get_meco_instances()
+        if not meco_instances:
+            # Warning already logged in _get_meco_instances if relevant
+            return port_map  # Return empty map
+
+        # 2. Iterate through each instance
+        for inst in meco_instances:
+            instance_name = inst["name"]
+            logger.debug(f"Processing instance: {instance_name}")
+
+            # 3. Extract instance ID
+            instance_id = instance_name.split("-")[0]
+
+            # 4. Get network state for the instance
+            network_state = _get_instance_network_state(instance_name)
+            if not network_state:
+                logger.warning(
+                    f"Could not get network state for instance {instance_name}. Skipping."
+                )
+                continue  # Skip to next instance if state unavailable
+
+            # 5. Iterate through interfaces in the state
+            for iface_name, iface_data in network_state.items():
+                # Skip non-network interfaces like loopback
+                if iface_data.get("type") != "broadcast":
+                    logger.debug(
+                        f"Skipping non-broadcast interface {iface_name} for instance {instance_name}."
+                    )
+                    continue
+
+                # 6. Process the interface data using the modified function
+                # --- This is where the IPv4 check happens ---
+                key = f"{instance_id}:{re.search(r'\d+$', iface_name).group()}"
+                result = _process_interface(
+                    instance_name, instance_id, iface_name, iface_data
+                )
+
+                # 7. Add to port_map only if _process_interface returned a valid mapping
+                if (
+                    result is not None
+                ):  # Only add to port_map if _process_interface returned a valid mapping tuple
+                    key, value = (
+                        result  # Unpack the tuple returned by _process_interface
+                    )
+                    port_map[key] = value  # Add to the main port_map dictionary
+                    logger.debug(f"Added mapping to port_map: {key} -> {value}")
+                else:
+                    logger.debug(
+                        f"_process_interface returned None for {instance_name}:{iface_name}, skipping in port_map."
+                    )
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
-    logger.info(f"Port mapping complete. Mapped {len(port_map)} interfaces.")
+    logger.info(
+        f"Port mapping process complete. Mapped {len(port_map)} interfaces (with IPv4)."
+    )
     return port_map
 
 
