@@ -279,6 +279,74 @@ def incus_remove_profile_device(profile_name: str, device_name: str) -> bool:
         return False
 
 
+def incus_create_network(network_name: str) -> bool:
+    """
+    Creates a managed Incus network using the Open vSwitch driver.
+    Uses configuration for driver and DNS mode.
+    """
+    network_type = "bridge"  # Standard for this use case
+    driver = CONFIG_DEFAULTS["bridge_driver"]
+    dns_mode = CONFIG_DEFAULTS["dns_mode"]
+
+    cmd = [
+        "sudo",
+        "incus",
+        "network",
+        "create",
+        network_name,
+        f"--type={network_type}",
+        f"bridge.driver={driver}",
+        f"dns.mode={dns_mode}",
+    ]
+    try:
+        result = run_command(
+            cmd, check=False, capture_output=True, log_level=logging.INFO
+        )
+        if result.returncode == 0:
+            logger.info(
+                f"Created Incus network '{network_name}' using {driver} driver."
+            )
+            return True
+        elif "already exists" in result.stderr.lower():
+            logger.info(f"Incus network '{network_name}' already exists.")
+            return True
+        else:
+            logger.error(
+                f"Failed to create Incus network '{network_name}': {result.stderr.strip()}"
+            )
+            return False
+    except Exception as e:
+        logger.error(f"Unexpected error creating Incus network '{network_name}': {e}")
+        return False
+
+
+def incus_delete_network(network_name: str) -> bool:
+    """Deletes an Incus network using sudo."""
+    cmd = ["sudo", "incus", "network", "delete", network_name]
+    try:
+        # Use check=False to handle network not existing
+        result = run_command(
+            cmd, check=False, capture_output=True, log_level=logging.INFO
+        )
+        if result.returncode == 0:
+            logger.info(f"Deleted Incus network: {network_name}")
+            return True
+        elif (
+            "not found" in result.stderr.lower()
+            or "does not exist" in result.stderr.lower()
+        ):
+            logger.info(f"Network {network_name} not found, nothing to delete.")
+            return True
+        else:
+            logger.warning(
+                f"Failed to delete network {network_name}: {result.stderr.strip()}"
+            )
+            return False  # Indicate failure if it was something other than not found
+    except Exception as e:
+        logger.error(f"Unexpected error deleting network {network_name}: {e}")
+        return False
+
+
 def incus_launch_instance(
     image: str,
     name: str,
