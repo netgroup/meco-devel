@@ -1,0 +1,27 @@
+# config.yaml
+defaults:
+  # Bridge/Network Names
+  ovs_bridge_internal: "br-int"
+  ovs_bridge_tunnel: "br-tun"
+
+  # Profile Names
+  profile_base_container: "meco-cnt"
+  profile_base_vm: "meco-vm"
+
+  # Interface Names (used in cloud-init generation or device naming if needed)
+  # These are often standard, but defining them allows for potential future flexibility
+  interface_internal: "br-int" # Name used when attaching NICs to internal bridge
+  interface_tunnel: "br-tun"   # Name used when attaching NICs to tunnel bridge (if used differently)
+
+  # Storage Pool (used in profile device)
+  storage_pool: "sshfs-pool"
+
+  # DNS Mode for Incus Networks
+  dns_mode: "dynamic"
+
+  # Bridge Driver for Incus Networks
+  bridge_driver: "openvswitch"
+
+  # Default Image Aliases
+  image_container: "images:ubuntu/22.04"
+  image_vm: "images:ubuntu/noble" # Or whatever default you prefer for VMs
