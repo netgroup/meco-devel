@@ -774,6 +774,20 @@ def _teardown_bridges():
     # logger.info(f"Deleted Incus profiles: {profile_container}, {profile_vm}")
 
 
+# --- Refactored _apply_openflow_rules to use helper functions ---
+def _apply_openflow_rules(bridge: str, flows: list[str]):
+    """Applies a list of OpenFlow rules to a specified bridge using helper functions."""
+    logger.info(f"Applying OpenFlow rules to bridge {bridge}...")
+    try:
+        ovs_del_flows(bridge)
+        logger.info(f"Cleared existing flows from bridge {bridge}.")
+        for rule in flows:
+            ovs_add_flow(bridge, rule)
+            # logger.info(f"OF rule added: {rule}") # Already logged in ovs_add_flow
+        logger.info("All flows installed successfully.")
+    except Exception as e:  # Catch exceptions from helpers
+        logger.error(f"Failed to apply OpenFlow rules to {bridge}: {e}")
+        raise
 
     except Exception as e:
         logger.error(f"Error building port map: {e}")
