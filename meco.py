@@ -89,72 +89,158 @@ def run_command(
         raise  # Re-raise the exception
 
 
-    """
-    Tear down and remove Incus and OVS bridges.
-    - Deletes all OpenFlow rules.
-    - Removes all non-bridge ports from each OVS bridge.
-    - Deletes Incus network objects for each bridge.
-    """
-    for br in ("incus-br-int", "incus-br-tun"):
-        # Remove all OpenFlow rules from the bridge.
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", br], check=False)
-         # List all ports on the bridge.
-        ports = subprocess.run(["sudo", "ovs-vsctl", "list-ports", br],
-                               capture_output=True, text=True, check=True).stdout.splitlines()
-        for p in ports:
-            if p == br:
-                continue    # Skip the bridge itself.
-            # Remove the port from OVS and delete the network device.
-            subprocess.run(["sudo", "ovs-vsctl", "--if-exists",
-                           "del-port", br, p], check=False)
-            subprocess.run(["sudo", "ip", "link", "del", p], check=False)
-
-        # Remove the Incus network object.
-        subprocess.run(["sudo", "incus", "network", "delete", br],
-                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logger.info(f"Deleted Incus network object: {br}")
+# --- Incus Specific Operations ---
 
 
-def _apply_openflow_rules(bridge: str, flows: List[str]):
-    """
-    Apply a set of OpenFlow rules to a given bridge.
-    - Clears any existing flows before applying new ones.
-    - Logs each flow addition.
-    - Raises/logs errors as needed.
-    """
-    logger.info(f"Applying OpenFlow rules to bridge {bridge}...")
+def incus_check_installed() -> bool:
+    """Checks if the 'incus' command is available."""
     try:
-        # Delete all existing OpenFlow rules.
-        subprocess.run(["sudo", "ovs-ofctl", "del-flows", bridge], check=False)
-        logger.info(f"Cleared existing flows from bridge {bridge}.")
+        run_command(["incus", "--version"], check=True, capture_output=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
-        # Apply each flow rule.
-        for rule in flows:
-            subprocess.run(["sudo", "ovs-ofctl", "add-flow",
-                           bridge, rule], check=True)
-            logger.info(f"OF rule added: {rule}")
-        logger.info("All flows installed successfully.")
+
+def incus_list_instances(format_type="json"):
+    """Gets the list of Incus instances."""
+    cmd = ["incus", "list", f"--format={format_type}"]
+    result = run_command(cmd, capture_output=True)
+    if format_type == "json":
+        return json.loads(result.stdout)
+    elif format_type == "csv":
+        return result.stdout.strip().splitlines()  # Return list of lines
+    else:
+        return result.stdout  # Return raw string for other formats
+
+
+def incus_wait_for_state(
+    instance_name: str, target_state: str = "Running", timeout: int = 60
+) -> bool:
+    """Waits for an Incus instance to reach a specific state."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            result = run_command(
+                ["incus", "query", f"/1.0/instances/{instance_name}/state"]
+            )
+            state_info = json.loads(result.stdout)
+            if state_info and state_info.get("status") == target_state:
+                return True
+        except Exception as e:
+            logger.debug(f"Error checking status for {instance_name}: {e}")
+        time.sleep(1)  # Poll every second
+    logger.error(
+        f"Instance {instance_name} did not reach state '{target_state}' within {timeout} seconds."
+    )
+    return False
+
+
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to apply OpenFlow rules: {e.stderr.strip()}")
         raise
     except Exception as e:
-        logger.error(f"An unexpected error occurred while applying flows: {e}")
-        raise
-
-
-def _build_port_map():
-    """
-    Build a mapping from instance interface (instance_id:ethX) to OVS bridge and OpenFlow port number.
-    - Iterates over all running MECO instances.
-    - For each eth* interface, finds the OVS bridge and ofport.
-    - Returns a dictionary: { "<instance_id>:<iface_idx>": (bridge, ofport) }
-    """
-    port_map = {}
-    logger.info("Starting port mapping process...")
+def incus_launch_instance(
+    image: str,
+    name: str,
+    profiles: list[str] = None,
+    networks: list[str] = None,
+    config: dict = None,
+    is_vm: bool = False,
+    cloud_init_file: str = None,
+) -> bool:
+    """Launches an Incus instance (container or VM)."""
+    cmd = ["incus", "launch", image, name]
+    if is_vm:
+        cmd.append("--vm")
+    if profiles:
+        for profile in profiles:
+            cmd.extend(["-p", profile])
+    if networks:
+        for network in networks:
+            cmd.extend(["--network", network])
+    if config:
+        for key, value in config.items():
+            cmd.extend(["-c", f"{key}={value}"])
+    if cloud_init_file:
+        cmd.extend(["-c", f"user.user-data=@{cloud_init_file}"])
 
     try:
-        # Get all Incus instances as JSON.
-        out = subprocess.run(
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Launched Incus instance: {name}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to launch instance {name}: {e.stderr.strip()}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error launching instance {name}: {e}")
+        return False
+
+
+def incus_add_instance_device(
+    instance_name: str, device_name: str, device_type: str, *options: str
+) -> bool:
+    """Adds a device to a running Incus instance."""
+    cmd = [
+        "incus",
+        "config",
+        "device",
+        "add",
+        instance_name,
+        device_name,
+        device_type,
+    ] + list(options)
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(
+            f"Added device {device_name} ({device_type}) to instance {instance_name}"
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.warning(
+            f"Failed to add device {device_name} to instance {instance_name}: {e.stderr.strip()}"
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            f"Unexpected error adding device {device_name} to instance {instance_name}: {e}"
+        )
+        return False
+
+
+def incus_delete_instance(name: str, force: bool = True, wait: bool = False) -> bool:
+    """
+    Deletes an Incus instance.
+
+    Args:
+        name (str): The name of the instance.
+        force (bool): If True, forces deletion. Defaults to True.
+        wait (bool): If True, waits for the operation to complete (Incus usually handles this). Defaults to False.
+
+    Returns:
+        bool: True if the command succeeded or the instance didn't exist, False otherwise.
+    """
+    cmd = ["incus", "delete", name]
+    if force:
+        cmd.append("--force")
+    # Use check=False to handle cases where instance might not exist gracefully
+    # unless specific error handling for that case is needed.
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        # logger.info(f"Deleted instance: {name}")
+        return True
+    except subprocess.CalledProcessError as e:
+        # Check if error is because instance doesn't exist (exit code might vary)
+        if "not found" in e.stderr.lower() or "does not exist" in e.stderr.lower():
+            logger.info(f"Instance {name} not found, nothing to delete.")
+            return True  # Consider it a success if it's already gone
+        else:
+            logger.error(f"Failed to delete instance {name}: {e.stderr.strip()}")
+            return False
+    except Exception as e:
+        logger.error(f"Unexpected error deleting instance {name}: {e}")
+        return False
+
+
             ["incus", "list", "--format=json"],
             capture_output=True,
             text=True,
