@@ -736,6 +736,44 @@ def _setup_bridges():
         raise
 
 
+# --- Update _teardown_bridges to use config names ---
+
+
+def _teardown_bridges():
+    """Tears down the MECO infrastructure using config names."""
+    # Use configured bridge names
+    bridge_internal = CONFIG_DEFAULTS["ovs_bridge_internal"]
+    bridge_tunnel = CONFIG_DEFAULTS["ovs_bridge_tunnel"]
+    profile_container = CONFIG_DEFAULTS["profile_base_container"]
+    profile_vm = CONFIG_DEFAULTS["profile_base_vm"]
+
+    # 1) Remove all OpenFlow rules and ports from br-int & br-tun
+    for br in (bridge_internal, bridge_tunnel):
+        ovs_del_flows(br)
+        try:
+            ports = ovs_list_ports(br)
+            for p in ports:
+                if p == br:
+                    continue
+                ovs_del_port(br, p)
+                run_command(
+                    ["sudo", "ip", "link", "del", p],
+                    check=False,
+                    log_level=logging.INFO,
+                )
+        except Exception as e:  # Catch broader exceptions from helpers
+            logger.warning(f"Error listing/processing ports for {br}: {e}")
+
+        # 2) Delete the Incus networks
+        incus_delete_network(br)
+
+    # 3) Delete the Incus profiles
+    # Note: server_off also handles this. This is just for symmetry if called independently.
+    # incus_delete_profile(profile_container)
+    # incus_delete_profile(profile_vm)
+    # logger.info(f"Deleted Incus profiles: {profile_container}, {profile_vm}")
+
+
 
     except Exception as e:
         logger.error(f"Error building port map: {e}")
