@@ -863,6 +863,30 @@ def _wait_for_ipv4_addresses(
     return port_map
 
 
+def _collect_topology_links(topo: dict) -> list[tuple[int, int]]:
+    """
+    Collects undirected links from the topology's visibility sections.
+
+    Args:
+        topo: The topology dictionary.
+
+    Returns:
+        A list of tuples representing undirected links (source_id, destination_id).
+    """
+    links: list[tuple[int, int]] = []
+    for section in ("visibility-constellation", "visibility-ground"):
+        for snap in topo.get(section, []):
+            for conn in snap.get("connection", []):
+                src = conn.get("source")
+                dst = conn.get("destination")
+                # Basic validation and type checking could be added here if needed
+                if src is not None and dst is not None:
+                    # Ensure consistent ordering for undirected link representation if needed,
+                    # though for adjacency list, (a,b) and (b,a) both add connections.
+                    links.append((src, dst))
+    return links
+
+
     except Exception as e:
         logger.error(f"Error building port map: {e}")
 
