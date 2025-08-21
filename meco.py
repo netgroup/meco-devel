@@ -449,22 +449,128 @@ def incus_delete_instance(name: str, force: bool = True, wait: bool = False) -> 
         return False
 
 
+def setup_meco_base_profiles() -> bool:
+    """
+    Sets up the base Incus profiles required for MECO using config names.
+    """
+    success = True
+    try:
+        profile_container = CONFIG_DEFAULTS["profile_base_container"]
+        profile_vm = CONFIG_DEFAULTS["profile_base_vm"]
+        ovs_bridge_internal = CONFIG_DEFAULTS["ovs_bridge_internal"]
+        ovs_bridge_tunnel = CONFIG_DEFAULTS["ovs_bridge_tunnel"]
+        storage_pool = CONFIG_DEFAULTS["storage_pool"]
+
+        # --- 1. Ensure 'meco-base' Incus profile exists ---
+        if not incus_profile_exists(profile_container):
+            if not incus_create_profile(profile_container):
+                success = False
+
+        # --- 2. Add root disk device to 'meco-base' ---
+        root_opts = ["path=/", f"pool={storage_pool}", "type=disk"]
+        if not incus_add_profile_device(profile_container, "root", "disk", *root_opts):
+            logger.warning(
+                f"Failed to add root disk to '{profile_container}'. It might already exist."
+            )
+
+        # --- 3. Configure eth0 NIC device in 'meco-base' -> br-int ---
+        # Note: Using the configured internal bridge name
+        if not incus_add_profile_device(
+            profile_container,
+            "eth0",
+            "nic",
+            "nictype=bridged",
+            f"parent={ovs_bridge_internal}",
+        ):
+            success = False
+
+        # --- 4. Create 'meco-vm' profile based on 'meco-base' ---
+        if not incus_profile_exists(profile_vm):
+            if not incus_copy_profile(profile_container, profile_vm):
+                success = False
+            # --- 5. Add eth1 NIC device to 'meco-vm' -> br-tun ---
+            # Note: Using the configured internal bridge name for VMs as well
+            # if not incus_add_profile_device(profile_vm, "eth1", "nic", "nictype=bridged", f"parent={ovs_bridge_tunnel}"):
+            #      success = False
+
+        if success:
+            logger.info(
+                f"MECO base profiles ('{profile_container}', '{profile_vm}') configured successfully."
+            )
+        else:
+            logger.error("MECO base profile setup completed with errors.")
+
+    except Exception as e:
+        logger.error(f"Failed to set up MECO base profiles: {e}")
+        success = False
+
+    return success
+
+
+def _get_meco_instances():
+    """
+    Retrieves a list of running MECO Incus instances.
+
+    Returns:
+        list: A list of dictionaries representing running MECO instances
+            as returned by `incus list --format=json`.
+            Returns an empty list if no instances are found or on error.
+    """
+    try:
+        result = run_command(
             ["incus", "list", "--format=json"],
+            check=True,
             capture_output=True,
             text=True,
-            check=True,
-        ).stdout
-        instances = json.loads(out)
-
-        # Filter to only running MECO instances.
+        )
+        all_instances = json.loads(result.stdout)
         meco_instances = [
-            inst for inst in instances
+            inst
+            for inst in all_instances
             if inst.get("config", {}).get("user.meco") == "true"
             and inst.get("status") == "Running"
         ]
-
         if not meco_instances:
             logger.warning("No running MECO instances found.")
+        return meco_instances
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error listing Incus instances: {e.stderr.strip()}")
+    except json.JSONDecodeError as e:
+        logger.error(f"Error parsing Incus list JSON output: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error getting MECO instances: {e}")
+    return []
+
+
+def delete_meco_instances(force: bool = True):
+    """
+    Deletes all Incus instances with user.meco=true (any status).
+    Uses ThreadPoolExecutor for parallel deletion.
+    Returns a dict with instance name as key and True/False for success.
+    """
+    meco_instances = _get_meco_instances()
+    names = [i["name"] for i in meco_instances]
+    results = {}
+    if not names:
+        logger.info("No MECO instances to delete.")
+        return results
+    workers = min(len(names), 16)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(incus_delete_instance, nm, force): nm for nm in names}
+        for fut in as_completed(futs):
+            nm = futs[fut]
+            try:
+                res = fut.result()
+                results[nm] = res
+                if res:
+                    logger.info(f"Deleted instance: {nm}")
+                else:
+                    logger.error(f"Failed to delete instance: {nm}")
+            except Exception as e:
+                logger.error(f"Error deleting {nm}: {e}")
+                results[nm] = False
+    return results
+
             return port_map
 
         for inst in meco_instances:
