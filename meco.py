@@ -1523,38 +1523,51 @@ users:
             logger.error(f"Unexpected error checking instance {name}: {e}")
         return False
 
+    def _create_container(
+        self, name: str, cloud_file: str, iface_defs: list, node_obj: dict
+    ):
         """Launch a container with one profile, N networks, and cloud-init."""
         if self._instance_exists(name):
             logger.info(f"Container {name} exists, skipping.")
             return
-        
-        # Launch the container with the base profile and cloud-init only
+
+        # Use configured names
+        profile_container = CONFIG_DEFAULTS["profile_base_container"]
+        ovs_bridge_internal = CONFIG_DEFAULTS["ovs_bridge_internal"]
+        image_container = CONFIG_DEFAULTS["image_container"]
+
         cmd = [
-            "incus", "launch", "images:ubuntu/22.04", name,
-            "-p", "meco-base",
-            "--network", "incus-br-int",
-            "-c", "user.meco=true",
-            "-c", f"user.user-data=@{cloud_file}",
-            "-c", f"user.meco.type={node_obj['type']}", 
-            "-c", f"user.meco.altitude={node_obj['altitude']}", 
+            "incus",
+            "launch",
+            image_container,
+            name,
+            "-p",
+            profile_container,
+            # "--network", ovs_bridge_internal, # Use configured internal network
+            "-c",
+            "user.meco=true",
+            "-c",
+            f"user.user-data=@{cloud_file}",
+            "-c",
+            f"user.meco.type={node_obj['type']}",
+            "-c",
+            f"user.meco.altitude={node_obj['altitude']}",
         ]
         logger.info("Running: " + " ".join(cmd))
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
+        run_command(cmd, check=True)
         if not self._wait_running(name, timeout=30):
             raise RuntimeError(f"{name} did not reach RUNNING")
-
         logger.info(f"{name} RUNNING")
-
-        # Add network devices after launch
-        for i in range(1, len(iface_defs)):
-            device_name = f"{name}-eth{i}"
-            device_args = [
-                "incus", "config", "device", "add", name, device_name,
-                "nic", "network=incus-br-int"
-            ]
-            logger.info(f"Adding network device: {' '.join(device_args)}")
-            subprocess.run(device_args, check=True, stdout=subprocess.DEVNULL)
+        # Add network devices after launch (if more than one interface is needed)
+        # eth0 is already attached via --network
+        # for i in range(0, len(iface_defs)): # Start from 1 if eth0 is already handled
+        #     device_name = f"eth{i}" # Standard naming
+        #     device_args = [
+        #         "incus", "config", "device", "add", name, device_name,
+        #         "nic", f"network={ovs_bridge_internal}" # Attach to configured internal bridge
+        #     ]
+        #     logger.info(f"Adding network device: {' '.join(device_args)}")
+        #     run_command(device_args, check=True)
 
     def _create_vm(self, name: str, cloud_file: str, iface_defs: List, node_obj: Dict):
         """Launch a VM with one profile, N networks, and cloud-init."""
