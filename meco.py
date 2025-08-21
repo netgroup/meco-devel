@@ -135,10 +135,150 @@ def incus_wait_for_state(
     return False
 
 
+def incus_create_profile(profile_name: str) -> bool:
+    """Creates an Incus profile."""
+    cmd = ["incus", "profile", "create", profile_name]
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Created Incus profile: {profile_name}")
+        return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to apply OpenFlow rules: {e.stderr.strip()}")
-        raise
+        if "already exists" in e.stderr.lower():
+            logger.info(f"Incus profile {profile_name} already exists.")
+            return True
+        else:
+            logger.error(f"Failed to create profile {profile_name}: {e.stderr.strip()}")
+            return False
     except Exception as e:
+        logger.error(f"Unexpected error creating profile {profile_name}: {e}")
+        return False
+
+
+def incus_profile_exists(profile_name: str) -> bool:
+    """Checks if an Incus profile exists."""
+    try:
+        result = run_command(
+            ["incus", "profile", "list", "--format=csv"], capture_output=True
+        )
+        profiles = result.stdout.strip().splitlines()
+        # Assuming CSV format: name,description,used_by
+        existing_profiles = {p.split(",")[0] for p in profiles if p.strip()}
+        return profile_name in existing_profiles
+    except Exception as e:
+        logger.error(f"Error checking if profile {profile_name} exists: {e}")
+        return False  # Assume it doesn't exist if check fails
+
+
+def incus_delete_profile(profile_name: str) -> bool:
+    """Deletes an Incus profile."""
+    cmd = ["incus", "profile", "delete", profile_name]
+    try:
+        # Use check=False to handle profile not existing
+        result = run_command(
+            cmd, check=False, capture_output=True, log_level=logging.INFO
+        )
+        if result.returncode == 0:
+            logger.info(f"Deleted Incus profile: {profile_name}")
+            return True
+        elif (
+            "not found" in result.stderr.lower()
+            or "does not exist" in result.stderr.lower()
+        ):
+            logger.info(f"Profile {profile_name} not found, nothing to delete.")
+            return True
+        else:
+            logger.warning(
+                f"Failed to delete profile {profile_name}: {result.stderr.strip()}"
+            )
+            return False  # Indicate failure if it was something other than not found
+    except Exception as e:
+        logger.error(f"Unexpected error deleting profile {profile_name}: {e}")
+        return False
+
+
+def incus_copy_profile(source_profile: str, dest_profile: str) -> bool:
+    """Copies an Incus profile."""
+    cmd = ["incus", "profile", "copy", source_profile, dest_profile]
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(f"Copied Incus profile {source_profile} to {dest_profile}")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Failed to copy profile {source_profile} to {dest_profile}: {e.stderr.strip()}"
+        )
+        return False
+    except Exception as e:
+        logger.error(
+            f"Unexpected error copying profile {source_profile} to {dest_profile}: {e}"
+        )
+        return False
+
+
+def incus_add_profile_device(
+    profile_name: str, device_name: str, device_type: str, *options: str
+) -> bool:
+    """Adds a device to an Incus profile."""
+    cmd = [
+        "incus",
+        "profile",
+        "device",
+        "add",
+        profile_name,
+        device_name,
+        device_type,
+    ] + list(options)
+    # Use check=False if adding might fail (e.g., device already exists) and you want to handle it
+    try:
+        run_command(cmd, check=True, capture_output=True, log_level=logging.INFO)
+        logger.info(
+            f"Added device {device_name} ({device_type}) to profile {profile_name}"
+        )
+        return True
+    except subprocess.CalledProcessError as e:
+        # Handle specific error like "already exists" if needed
+        logger.warning(
+            f"Failed to add device {device_name} to profile {profile_name}: {e.stderr.strip()}"
+        )
+        return False  # Or raise depending on desired behavior for failures
+    except Exception as e:
+        logger.error(
+            f"Unexpected error adding device {device_name} to profile {profile_name}: {e}"
+        )
+        return False
+
+
+def incus_remove_profile_device(profile_name: str, device_name: str) -> bool:
+    """Removes a device from an Incus profile."""
+    cmd = ["incus", "profile", "device", "remove", profile_name, device_name]
+    # Use check=False if removing might fail (e.g., device doesn't exist) and you want to handle it
+    try:
+        result = run_command(
+            cmd, check=False, capture_output=True, log_level=logging.INFO
+        )
+        if result.returncode == 0:
+            logger.info(f"Removed device {device_name} from profile {profile_name}")
+            return True
+        elif (
+            "not found" in result.stderr.lower()
+            or "does not exist" in result.stderr.lower()
+        ):
+            logger.info(
+                f"Device {device_name} not found on profile {profile_name}, nothing to remove."
+            )
+            return True
+        else:
+            logger.warning(
+                f"Failed to remove device {device_name} from profile {profile_name}: {result.stderr.strip()}"
+            )
+            return False
+    except Exception as e:
+        logger.error(
+            f"Unexpected error removing device {device_name} from profile {profile_name}: {e}"
+        )
+        return False
+
+
 def incus_launch_instance(
     image: str,
     name: str,
