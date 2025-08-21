@@ -1628,73 +1628,77 @@ users:
         logger.info(f"{name} RUNNING")
 
     def _install_initial_flows(self, topo):
-        """
-        Installs flows for every link in the topology.
+        """Build and install multi-output OpenFlow rules from the topology.
+
+        Strategy:
+        1. Wait for every declared node (eth0) to obtain an IPv4 and build port_map.
+        2. Parse topology links and build an adjacency list per bridge.
+        3. For each in_port create ONE rule whose actions output to ALL neighbour ports.
+        (Prevents rule shadowing & ensures ARP/ICMP reachability.)
+        4. Add an ARP broadcast rule (higher priority) so unresolved neighbours learn MACs.
+        5. Finish with a table‑default drop rule (priority=0).
         """
         # 1. Wait for IPv4 and build port map
         port_map = _wait_for_ipv4_addresses(topo)
         if not port_map:
-            logger.error("No ports mapped; cannot install flows.")
+            # Error already logged in helper
             return
 
-        # 2) Collect all (src, dst, delay, loss, bandwidth)
-        links = []
-        for section in ("visibility-constellation", "visibility-ground"):
-            for snap in topo.get(section, []):
-                for conn in snap.get("connection", []):
-                    links.append((
-                        conn["source"], conn["destination"],
-                        # conn.get("delay", 0),
-                        # conn.get("loss", 0),
-                        # conn.get("bandwidth", 0)
-                    ))
+        # 2. Collect links from topology
+        links = _collect_topology_links(topo)
+        if not links:
+            logger.warning("[Flows] No links defined in topology; nothing to install.")
+            return
 
-        # Group flows by bridge
-        bridge_flows: Dict[str, List[str]] = {
-            "incus-br-int": [], "incus-br-tun": []}
+        # Define managed bridges (could be passed or accessed via config if needed elsewhere)
+        managed_bridges = {
+            CONFIG_DEFAULTS["ovs_bridge_internal"],
+            CONFIG_DEFAULTS["ovs_bridge_tunnel"],
+        }
 
-        # 3) Build flow rules and TC commands
-        of_rules = []
-        for src_id, dst_id in links:
-            src_key = f"{src_id}:0"
-            dst_key = f"{dst_id}:0"
+        # 3. Build adjacency map
+        adjacency = _build_adjacency_map(links, port_map, managed_bridges)
+        if not adjacency:
+            # Error already logged in helper
+            return
 
-            src_info = port_map.get(src_key)
-            dst_info = port_map.get(dst_key)
+        # 4. Build flow strings per bridge
+        bridge_flows: dict[str, list[str]] = {}
+        for br, neigh_map in adjacency.items():
+            flows: list[str] = []
 
-            if src_info is None or dst_info is None:
-                logger.error(f"Missing port_map entries for {
-                             src_key} or {dst_key}. Skipping flow.")
-                continue
+            # Get all unique ports for this bridge to potentially create ARP rule
+            all_ports = sorted(
+                {p for p in neigh_map.keys()}
+                | {n for s in neigh_map.values() for n in s}
+            )
 
-            src_bridge, p_src = src_info
-            dst_bridge, p_dst = dst_info
+            # 4a. Generate ARP rules for the bridge
+            arp_flows = _generate_arp_rules(all_ports)
+            flows.extend(arp_flows)
 
-            if src_bridge != dst_bridge:
-                logger.error(f"Link between {src_key} and {dst_key} spans different bridges ({
-                             src_bridge} vs {dst_bridge}). This is not supported. Skipping flow.")
-                continue
+            # 4b. Generate main forwarding rules for the bridge
+            forwarding_flows = _generate_forwarding_rules(neigh_map)
+            flows.extend(forwarding_flows)
 
-            of_rules += [
-                f"priority=100,in_port={p_src},actions=output:{p_dst}",
-                f"priority=100,in_port={p_dst},actions=output:{p_src}"
-            ]
-            bridge_flows[src_bridge].extend(of_rules)
+            # 4c. Add default drop rule
+            flows.append("priority=0,actions=drop")
 
-            """
-            # TC on host devices
-            dev_src = port_map.host_dev[src_key]
-            dev_dst = port_map.host_dev[dst_key]
-            apply_tc(dev_src, delay, loss, bw)
-            apply_tc(dev_dst, delay, loss, bw)
-            """
-        # 4) Default drop
+            bridge_flows[br] = flows
+
+        # 5. Apply flows to each bridge
         for br, flows in bridge_flows.items():
-            if flows:
-                flows.append("priority=0,actions=drop")
+            # Subtract 1 for the drop rule which is not a "functional" rule
+            logger.info(
+                f"[Flows] Installing {len(flows)-1} (non-default) rules on {br}."
+            )
+            try:
                 _apply_openflow_rules(br, flows)
-            else:
-                logger.info(f"No flows to apply for bridge {br}.")
+            except Exception as e:
+                logger.error(f"[Flows] Failed applying rules on {br}: {e}")
+                # Depending on requirements, you might want to return/raise here
+
+        logger.info("[Flows] Adjacency-based multi-output rules installed.")
 
 
 def serve_forever():
