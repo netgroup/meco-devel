@@ -1250,37 +1250,15 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
         return meco_pb2.MecoResponse(message=response_msg)
 
     def _check_incus(self):
-        try:
-            subprocess.run(
-                ["incus", "--version"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=True,
-            )
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            return False
+        """Checks if the 'incus' command is available."""
+        # --- Use helper function ---
+        return incus_check_installed()
 
     def _wait_running(self, name: str, timeout: int = 60) -> bool:
-        """Waits for an Incus instance to reach the 'Running' state."""
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            try:
-                result = subprocess.run(
-                    ["incus", "list", name, "--format=json"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                instances_info = json.loads(result.stdout)
-                if instances_info and instances_info[0].get("status") == "Running":
-                    return True
-            except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-                logger.debug(f"Error checking status for {name}: {e}")
-            time.sleep(1) # Poll every second
-        logger.error(f"Instance {name} did not reach 'Running' state within {timeout} seconds.")
-        return False
-    
+        """Waits for an Incus instance to reach the 'Running' state using helper."""
+        # --- Use helper function ---
+        return incus_wait_for_state(name, target_state="Running", timeout=timeout)
+
     def Start(self, request, context):
         """Handles Start requests with server_file_path or client_file_content."""
         try:
@@ -1408,44 +1386,7 @@ class MecoServiceServicer(meco_pb2_grpc.MecoServiceServicer):
             )
 
         try:
-            out = subprocess.run(
-                ["incus", "list", "--format=json"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            insts = json.loads(out)
-            # select only those we marked with user.meco=true
-            names = [
-                i["name"]
-                for i in insts
-                if i.get("config", {}).get("user.meco") == "true"
-            ]
-
-            if names:
-                workers = min(len(names), 32)
-                with ThreadPoolExecutor(max_workers=workers) as pool:
-                    futures_ = {
-                        pool.submit(
-                            subprocess.run,
-                            ["incus", "delete", nm, "--force"],
-                            capture_output=True,
-                            text=True,
-                        ): nm
-                        for nm in names
-                    }
-                    for fut in as_completed(futures_):
-                        nm = futures_[fut]
-                        try:
-                            res = fut.result()
-                            if res.returncode == 0:
-                                logger.info(f"Deleted instance: {nm}")
-                            else:
-                                logger.error(
-                                    f"Failed delete {nm}: {res.stderr.strip()}"
-                                )
-                        except Exception as e:
-                            logger.error(f"Error deleting {nm}: {e}")
+            delete_meco_instances(force=True)
         except Exception as e:
             logger.error(f"Shutdown cleanup error: {e}")
 
@@ -1626,7 +1567,8 @@ users:
         """
         Installs flows for every link in the topology.
         """
-        port_map = _build_port_map()
+        # 1. Wait for IPv4 and build port map
+        port_map = _wait_for_ipv4_addresses(topo)
         if not port_map:
             logger.error("No ports mapped; cannot install flows.")
             return
@@ -1741,13 +1683,9 @@ def server_status():
                 with open(ACTIVITY_FLAG, "r") as f:
                     running_file = f.read().strip()
                 logger.info(f"Emulation based on {running_file} is running")
-                result = subprocess.run(
-                    ["incus", "list", "--format=json"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                names = [c["name"] for c in json.loads(result.stdout)]
+                # --- Use helper function ---
+                instances = incus_list_instances(format_type="json")
+                names = [c["name"] for c in instances]
                 logger.info(f"Active containers: {names}")
 
             except FileNotFoundError:
@@ -1817,47 +1755,9 @@ def server_off(force=False):
             )
             return
         logger.info("Force flag set: tearing down active emulation first.")
-        # teardown logic (delete MECO instances)...
+        # --- Refactored instance teardown logic using helper functions ---
         try:
-            out = subprocess.run(
-                ["incus", "list", "--format=json"],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout
-            # filter only MECO instances
-            names = [
-                inst["name"]
-                for inst in json.loads(out)
-                if inst.get("config", {}).get("user.meco") == "true"
-            ]
-            if names:
-                max_workers = min(len(names), 32) or 1
-                with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    futures = {
-                        pool.submit(
-                            subprocess.run,
-                            ["incus", "delete", name, "--force"],
-                            capture_output=True,
-                            text=True,
-                            check=True,
-                        ): name
-                        for name in names
-                    }
-                    for fut in as_completed(futures):
-                        nm = futures[fut]
-                        try:
-                            fut.result()
-                            logger.info(f"Deleted instance: {nm}")
-                        except subprocess.CalledProcessError as ex:
-                            logger.error(f"Failed deleting {nm}: {ex.stderr.strip()}")
-                        except Exception as ex:
-                            logger.error(f"Failed deleting {nm}: {ex}")
-            else:
-                logger.info("No active emulation instances found to delete.")
-
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error listing Incus instances: {e.stderr.strip()}")
+            delete_meco_instances(force=True)
         except Exception as e:
             logger.error(f"Error cleaning up emulation instances: {e}")
 
@@ -1932,12 +1832,14 @@ def server_off(force=False):
     except FileNotFoundError:
         pass
 
-
-
+    # --- Use configured profile names for deletion ---
     try:
-        subprocess.run(["incus", "profile", "delete", "meco-base"], check=True, capture_output=True, text=True)
-        subprocess.run(["incus", "profile", "delete", "meco-vm"], check=True, capture_output=True, text=True)
-        logger.info("Deleted Incus profiles: meco-base, meco-vm")
+        # Use configured profile names
+        profile_container = CONFIG_DEFAULTS["profile_base_container"]
+        profile_vm = CONFIG_DEFAULTS["profile_base_vm"]
+        # --- Use helper functions ---
+        incus_delete_profile(profile_container)
+        incus_delete_profile(profile_vm)
     except subprocess.CalledProcessError as e:
         logger.warning(f"Failed to delete Incus profiles: {e.stderr.strip()}")
     except Exception as e:
