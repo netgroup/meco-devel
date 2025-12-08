@@ -7,11 +7,10 @@ required:
   - topology
   - node-types
   - nodes
-  - visibility-constellation
+  # - visibility-constellation
   - visibility-ground
 
 properties:
-
   topology:
     type: object
     additionalProperties: false
@@ -91,12 +90,12 @@ properties:
             additionalProperties: false
             required: [id, type]
             properties:
-              id:   { type: integer, minimum: 0 }
+              id: { type: integer, minimum: 0 }
               type: { type: string }
 
-  visibility-constellation:
-    type: array
-    items: { $ref: "#/definitions/visibilityEntry" }
+  # visibility-constellation:
+  #   type: array
+  #   items: { $ref: "#/definitions/visibilityEntry" }
 
   visibility-ground:
     type: array

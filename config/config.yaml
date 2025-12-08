@@ -1,0 +1,45 @@
+# config.yaml
+defaults:
+  # Bridge/Network Names
+  integration_bridge: "br-int"
+  tunnel_bridge: "br-tun"
+
+  # Profile Names
+  profile_base_container: "meco-cnt"
+  profile_base_vm: "meco-vm"
+
+  # Storage Pool (used in profile device)
+  storage_pool: "default"
+
+  # DNS Mode for Incus Networks
+  dns_mode: "dynamic"
+
+  # Bridge Driver for Incus Networks
+  bridge_driver: "openvswitch"
+
+  # Default Image Aliases
+  image_container: "images:ubuntu/22.04"
+  image_vm: "images:ubuntu/noble" # Or whatever default you prefer for VMs
+
+# Hypervisor mapping used by the MECO server to decide where each instance
+# should be created. Instance names must match the generated Incus instance
+# names (e.g. "0-Satellite").
+hypervisors:
+  hv1:
+    instances:
+      - "1-Satellite"
+      - "2-Terminal"
+      - "3-Terminal"
+      - "4-Terminal"
+      - "5-Terminal"
+    ip: "10.55.0.186"
+  # hv2:
+  #   instances:
+  #     - "3-Terminal"
+  #     - "4-Terminal"
+  #   ip: "10.55.0.225"
+  # hv3:
+  #   instances:
+  #     # - "4-GroundStation"
+  #     # - "5-GroundStation"
+  #   ip: "10.55.0.98"
