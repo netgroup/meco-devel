@@ -8,6 +8,8 @@ import time
 import json
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
+import subprocess
+import shlex
 
 logger = logging.getLogger("meco.network.manager")
 
@@ -271,6 +273,165 @@ class NetworkManager:
         return {h: dict(b) for h, b in hv_bridge_rules.items()}
 
 
+    def generate_of13_rules_from_visibility(
+        self, topo: dict, vlan_id: int | None = None
+    ) -> Dict[str, Dict[str, List[str]]]:
+        """
+        Build OpenFlow 1.3 rules per hypervisor/bridge from the topology visibility.
+
+        Returns a mapping: { hypervisor: { bridge: [flow_string, ...] } }
+        """
+        # Compute current port mappings (includes hypervisor, bridge, ofport)
+        # Using build_port_map as the waiter
+        expected_nodes = len(topo.get("nodes", []))
+        port_map = self.build_port_map(expected_count=expected_nodes, timeout=120)
+        if not port_map:
+            logger.error("[OF13] No port map available. Cannot generate rules.")
+            return {}
+
+        # Build node type map by id
+        node_type: Dict[int, str] = {}
+        for n in topo.get("nodes", []):
+            try:
+                nid = int(n.get("id"))
+                node_type[nid] = str(n.get("type", "")).lower()
+            except Exception:
+                continue
+
+        # Collect visibility links (undirected for grouping; direction used when building rules)
+        links = self._collect_topology_links(topo)
+        if not links:
+            logger.warning("[OF13] No visibility links; nothing to generate.")
+            return {}
+
+        # Index port_map entries by node id for eth0 ("id:0")
+        def pm_entry(node_id: int):
+            return port_map.get(f"{node_id}:0")  # (hv, br, port)
+
+        # Group terminals per satellite on each (hypervisor,bridge)
+        # sat_groups[(hv,br,sat_id)] = { 'sat_port': int, 'term_ports': [int,...] }
+        sat_groups: dict[tuple[str, str, int], dict[str, object]] = {}
+
+        for a, b in links:
+            a_type = node_type.get(a, "")
+            b_type = node_type.get(b, "")
+            # Normalise as satellite-terminal pairs; ignore other types for now
+            if a_type == "satellite" and b_type == "terminal":
+                sat_id, te_id = a, b
+            elif b_type == "satellite" and a_type == "terminal":
+                sat_id, te_id = b, a
+            else:
+                # Skip unsupported link types in this helper
+                continue
+
+            sat_pm = pm_entry(sat_id)
+            te_pm = pm_entry(te_id)
+            if not sat_pm or not te_pm:
+                logger.debug(f"[OF13] Skip pair {sat_id}<->{te_id}: missing port map.")
+                continue
+            sat_hv, sat_br, sat_port = sat_pm
+            te_hv, te_br, te_port = te_pm
+
+            # Must be on same hypervisor and bridge to wire directly
+            if sat_hv != te_hv or sat_br != te_br:
+                logger.warning(
+                    f"[OF13] {sat_id}(sat) and {te_id}(term) on different domains: {sat_hv}/{sat_br} vs {te_hv}/{te_br}; skipping."
+                )
+                continue
+
+            key = (sat_hv, sat_br, sat_id)
+            grp = sat_groups.get(key)
+            if not grp:
+                grp = {"sat_port": sat_port, "term_ports": []}
+                sat_groups[key] = grp
+            grp["term_ports"].append(te_port)
+
+        # Assemble flows per hypervisor/bridge
+        hv_bridge_rules: dict[str, dict[str, list[str]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+
+        # Default VLAN id (matches example if not provided)
+        vlan = vlan_id if vlan_id is not None else 3
+
+        # Prepare shared baseline + learn rule per hv/bridge (add once)
+        baseline_cache = set()  # (hv, br)
+        
+        # Collect all ports per (hv, br) for ARP handling
+        hv_br_ports: dict[tuple[str, str], set[int]] = defaultdict(set)
+        for (hv, br, sat_id), grp in sat_groups.items():
+            hv_br_ports[(hv, br)].add(grp["sat_port"])
+            hv_br_ports[(hv, br)].update(grp["term_ports"])
+
+        for (hv, br, sat_id), grp in sat_groups.items():
+            sat_port = grp["sat_port"]
+            term_ports: list[int] = sorted(set(grp["term_ports"]))
+            if not term_ports:
+                continue
+
+            # 0) Baseline pipeline tables, ARP rules, and learn rule (once per hv/br)
+            if (hv, br) not in baseline_cache:
+                # Add ARP broadcast rules FIRST (highest priority at table 0)
+                all_ports_here = sorted(hv_br_ports[(hv, br)])
+                logger.info(f"[OF13] Adding ARP rules for {hv}/{br} with ports: {all_ports_here}")
+                
+                for in_p in all_ports_here:
+                    other_ports = [p for p in all_ports_here if p != in_p]
+                    if other_ports:
+                        arp_output_str = ",".join(f"output:{p}" for p in other_ports)
+                        hv_bridge_rules[hv][br].append(
+                            f"table=0,priority=200,in_port={in_p},arp,actions={arp_output_str}"
+                        )
+                
+                # Then add baseline tables
+                hv_bridge_rules[hv][br].extend(
+                    [
+                        # Default drop table
+                        "table=22,priority=0,actions=drop",
+                        # Unicast resolution table (learned entries). If miss, go to flood/mirror table 5.
+                        "table=20,priority=0,actions=resubmit(,5)",
+                        # Flood/mirror table. If miss here, drop.
+                        "table=5,priority=0,actions=resubmit(,22)",
+                        # Learn rule: TERM source MAC gets learned to table 20
+                        (
+                            "table=9,priority=1,actions="
+                            "learn(table=20,priority=1,hard_timeout=60,"
+                            "NXM_OF_VLAN_TCI[0..11],"
+                            "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
+                            "load:NXM_OF_VLAN_TCI[]->NXM_OF_VLAN_TCI[],"
+                            "output:NXM_OF_IN_PORT[])"
+                        ),
+                    ]
+                )
+                baseline_cache.add((hv, br))
+
+            # 1) SAT -> pipeline entry (table 0) with VLAN tag, then consult learned unicast (table 20)
+            hv_bridge_rules[hv][br].append(
+                f"cookie=0x102,table=0,priority=100,in_port={sat_port},vlan_tci=0,"
+                f"actions=load:0x{vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,20)"
+            )
+
+            # 2) Downlink replicate SAT -> all terminals for this group (clear VLAN before output)
+            actions = []
+            for te_p in term_ports:
+                actions.append("load:0->NXM_OF_VLAN_TCI[]")
+                actions.append(f"output:{te_p}")
+            hv_bridge_rules[hv][br].append(
+                "cookie=0x103,table=5,priority=100,"
+                f"vlan_tci=0x{vlan:x}/0x0fff,actions=" + ",".join(actions)
+            )
+
+            # 3-4) Uplink TERM -> SAT per terminal: tag, learn (resubmit to 9), clear tag, output SAT
+            for idx, te_p in enumerate(term_ports, start=0):
+                cookie = 0x100 + idx  # simple per-entry cookie
+                hv_bridge_rules[hv][br].append(
+                    f"cookie=0x{cookie:x},table=0,priority=100,in_port={te_p},vlan_tci=0,"
+                    f"actions=load:0x{vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),load:0->NXM_OF_VLAN_TCI[],output:{sat_port}"
+                )
+
+        return {hv: dict(br_map) for hv, br_map in hv_bridge_rules.items()}
+
+
     def _collect_topology_links(self, topo: dict) -> List[Tuple[int, int]]:
         links = []
         for section in ("visibility-constellation", "visibility-ground"):
@@ -282,44 +443,41 @@ class NetworkManager:
                         links.append((src, dst))
         return links
 
-    def build_port_map(self, timeout: int = 60) -> Dict[str, Tuple[str, str, int]]:
+
+    def build_port_map(self, expected_count: int = 0, timeout: int = 120) -> Dict[str, Tuple[str, str, int]]:
         """
         Builds a mapping of instance_id:interface_index -> (hypervisor, ovs_bridge, ovs_port_number)
         Waits for IPv4 addresses to be assigned.
         """
-        logger.info(f"Building port map (timeout={timeout}s)...")
+        logger.info(f"Building port map (expecting ~{expected_count} nodes, timeout={timeout}s)...")
         start_time = time.time()
         port_map = {}
         
         while time.time() - start_time < timeout:
             current_map = self._scan_ports()
-            # We don't have a strict 'expected' count here easily without topology, 
-            # but we can return what we have if called iteratively or just return best effort.
-            # Ideally obtaining topology would be better but keeping it decoupled:
             port_map = current_map
-            if port_map: 
-                # In a real impl, we'd check if len(port_map) == expected_nodes
-                # For now, we return what we find after one pass? 
-                # No, the original waited. We should probably wait if map is empty?
-                # Or caller handles waiting.
-                # meco.py logic was: wait loop is inside meco.py's _wait_for_ipv4_addresses
-                # Let's move the loop to the caller or implement basic wait here.
-                # But self.build_port_map implies a single build. 
-                # Let's rename this to scan and let a higher level wait.
-                # However, for this task, I'll implement a simple wait loop strategy matching meco.py roughly.
-                pass
             
-            # For this port, I will return the map immediately and let the LifecycleManager loop if needed.
-            # But wait, meco.py had the loop inside _wait_for_ipv4_addresses.
-            # I will assume one pass is enough OR the caller loops.
-            return current_map
+            got = len(port_map)
+            # If we expect N nodes, we expect at least N eth0 interfaces approx.
+            # Ideally each node has >=1 interface.
+            if expected_count > 0 and got >= expected_count:
+                 logger.info(f"Port map complete: found {got}/{expected_count} interfaces.")
+                 return port_map
+                 
+            # Log progress periodically?
+            if int(time.time() - start_time) % 5 == 0:
+                logger.info(f"Waiting for ports... found {got}/{expected_count}")
             
+            time.sleep(2)
+            
+        logger.warning(f"Timeout waiting for ports. Found {len(port_map)}/{expected_count}.")
         return port_map
 
     def _scan_ports(self) -> Dict[str, Tuple[str, str, int]]:
         """Internal scan for port mapping."""
         port_map = {}
         hypervisors = CONFIG.get("hypervisors", {})
+        logger.debug(f"Scanning ports. Configured hypervisors: {list(hypervisors.keys())}")
         
         # 1. Collect all instances to check
         targets = [] # List of (remote_alias, instance_dict)
@@ -327,15 +485,27 @@ class NetworkManager:
         if hypervisors:
             for remote in hypervisors:
                 try:
-                    # List instances on remote
-                    # We can use incus_client.executor.run for "incus list remote: ..."
                     res = incus_client.executor.run(
                         ["incus", "list", f"{remote}:", "--format=json"], 
                         check=True, capture_output=True
                     )
                     instances = json.loads(res.stdout)
+                    logger.debug(f"Found {len(instances)} instances on {remote}")
                     for inst in instances:
-                        targets.append((remote, inst))
+                        # User snippet suggests including all instances and filtering later or relying on 'user.meco' being present.
+                        # However, meco-27oct.py snippet logic: adds ALL to remote_instances list.
+                        # But then iterates them. 
+                        # To be safe and trusting the user's advice: include ALL running instances from remote
+                        # OR check for meco config existence loosely.
+                        # Let's try to include if status is Running, regardless of config for now, 
+                        # or log why it's skipped.
+                        
+                        # Debug log config
+                        # logger.debug(f"Instance {inst.get('name')} config: {inst.get('config', {}).get('user_meco')}")
+                        
+                        if inst.get("status") == "Running":
+                             targets.append((remote, inst))
+
                 except Exception as e:
                     logger.warning(f"Failed to list instances on {remote}: {e}")
         else:
@@ -352,7 +522,11 @@ class NetworkManager:
                     targets.append((None, inst))
             except Exception:
                 pass
-                
+        
+        if not targets:
+            logger.debug("No running MECO instances found during scan.")
+            return {}
+
         # 2. Process each instance
         for remote, inst in targets:
             name = inst.get("name")
@@ -360,17 +534,6 @@ class NetworkManager:
             
             # Get state
             try:
-                # incus query remote:/1.0/instances/name/state
-                # Note: IncusClient doesn't have query method yet, implementing ad-hoc command
-                query_target = f"{remote}:{name}" if remote else name
-                res = incus_client.executor.run(
-                   ["incus", "query", f"/{'1.0'}/instances/{query_target}/state"],
-                   # Logic fix: query path usually needs /1.0/instances/... 
-                   # If remote, we prefix URI with remote? No, incus query remote:/...
-                   # If remote is set, query arg is "{remote}:/1.0/instances/{name}/state"
-                   # If local, query arg is "/1.0/instances/{name}/state"
-                )
-                # Let's clean up command construction
                 uri = f"/1.0/instances/{name}/state"
                 if remote:
                     uri = f"{remote}:{uri}"
@@ -380,13 +543,17 @@ class NetworkManager:
                 )
                 state = json.loads(res.stdout)
                 net_state = state.get("network", {})
-            except Exception:
-                logger.debug(f"Failed to query state for {name}")
+            except Exception as e:
+                logger.debug(f"Failed to query state for {name} on {remote}: {e}")
                 continue
                 
             # Parse interfaces
             # Derive ID from name "ID-Type"
-            instance_id = name.split("-")[0]
+            try:
+               instance_id = name.split("-")[0]
+               int(instance_id) # Validate it is int
+            except ValueError:
+               continue
             
             for iface, data in net_state.items():
                 if data.get("type") != "broadcast": continue
@@ -397,33 +564,91 @@ class NetworkManager:
                     if addr.get("family") == "inet":
                         ipv4 = addr.get("address")
                         break
-                if not ipv4: continue
+                if not ipv4: 
+                    logger.debug(f"No IPv4 for {name} {iface}")
+                    continue
                 
                 # Check ethX
                 if not iface.startswith("eth"): continue
+                
                 try:
-                    idx = int(re.search(r"\d+", iface).group())
-                except: continue
-                
-                # host_dev = data.get("host_name")
-                host_dev = data.get("host_name")
-                if not host_dev: continue
-                
-                # Find Bridge
-                target_exec = remote if remote else None
-                
-                # Try remote check first if remote
-                br = ovs.port_to_br(host_dev, target=target_exec)
-                if not br: continue
-                
-                # Get OFPort
-                ofport = ovs.get_interface_ofport(host_dev, target=target_exec)
-                if ofport is None or ofport < 0: continue
-                
-                # Map it
-                key = f"{instance_id}:{idx}"
-                # Value: (hypervisor_name, bridge, port)
-                # Use remote as hypervisor name
-                port_map[key] = (remote or "", br, ofport)
-                
+
+                    # Parse index
+                    idx = int(re.findall(r"\d+", iface)[0])
+                    
+                    # Get host device
+                    host_dev = data.get("host_name")
+                    if not host_dev: continue
+
+                    # Resolve bridge and OFPort
+                    br = None
+                    ofport = None
+
+                    if remote:
+                         # Remote: Use SSH to resolve
+                         br, ofport = self._resolve_remote_port(remote, host_dev)
+                    else:
+                         # Local: Use OVS helper
+                         br = ovs.port_to_br(host_dev)
+                         ofport = ovs.get_interface_ofport(host_dev)
+
+                    if not br: continue
+                    if ofport is None or ofport < 0: continue
+                    
+                    # Key: "id:index" -> (hv, br, ofport)
+                    # If remote is None, we need to know local hv name? 
+                    # Actually generate_of13 rules handles 'hv' as a key.
+                    # If remote is None, we should use a default name or 'local'?
+                    # In meco.py it used 'local' if no hypervisors.
+                    hv_key = remote if remote else "local"
+                    
+                    port_map[f"{instance_id}:{idx}"] = (hv_key, br, ofport)
+                    logger.debug(f"Mapped {name}/{iface} -> {hv_key}/{br}/{ofport}")
+
+                except Exception:
+                    continue
+                    
         return port_map
+
+    def _resolve_remote_port(self, hypervisor: str, interface: str) -> Tuple[Optional[str], Optional[int]]:
+        """
+        Resolves the OVS bridge and OFPort for a given interface on a remote hypervisor.
+        Uses direct SSH commands to avoid 'incus exec' nesting issues.
+        """
+        ssh_addr = self._get_hypervisor_ssh_addr(hypervisor)
+        if not ssh_addr: 
+            return None, None
+
+        # Helper to run SSH command
+        def run_ssh(cmd_list):
+            try:
+                # Use batch mode, short timeout
+                ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", ssh_addr] + cmd_list
+                res = executor.run(ssh_cmd, check=False, capture_output=True)
+                if res.returncode == 0:
+                     return res.stdout.strip()
+            except Exception as e:
+                logger.debug(f"SSH to {ssh_addr} failed: {e}")
+            return None
+
+        # 1. Get Bridge
+        # sudo ovs-vsctl port-to-br <interface>
+        br_name = run_ssh(["sudo", "ovs-vsctl", "port-to-br", interface])
+        if not br_name:
+            return None, None
+            
+        # 2. Get OFPort
+        # sudo ovs-vsctl get Interface <interface> ofport
+        ofport_str = run_ssh(["sudo", "ovs-vsctl", "get", "Interface", interface, "ofport"])
+        
+        try:
+            ofport = int(ofport_str)
+            return br_name, ofport
+        except (ValueError, TypeError):
+            return br_name, None
+
+    def _get_hypervisor_ssh_addr(self, hypervisor: str) -> str:
+        """Returns the SSH host/IP for a hypervisor."""
+        hv_config = CONFIG.get("hypervisors", {}).get(hypervisor, {})
+        return hv_config.get("host") or hv_config.get("ip") or hypervisor
+

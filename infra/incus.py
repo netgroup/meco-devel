@@ -264,7 +264,8 @@ class IncusClient:
         try:
             self.executor.run(cmd, check=True, capture_output=True)
             return True
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to delete {name}: {e}")
             return False
 
     def add_instance_device(self, instance_name: str, device_name: str, device_type: str, *options: str) -> bool:

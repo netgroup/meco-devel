@@ -18,17 +18,14 @@ from infra.incus import IncusClient
 from config.loader import CONFIG
 
 # Logging Setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S"
-)
-logger = logging.getLogger("meco.main")
+from utils.logger import setup_logging
+logger = setup_logging("meco.main")
 
 # Constants
 PID_FILE = "/tmp/meco_server.pid"
 PID_LIST_FILE = "/tmp/meco_pids.txt"
 ACTIVITY_FLAG = "/tmp/meco_activity"
+UPLOADS_DIR = "/tmp/meco_uploads"
 
 def is_running(pid):
     """Checks if a process with the given PID is running."""
@@ -138,7 +135,9 @@ def server_off(force=False):
         logger.info("Force stop requested. Cleaning up emulation...")
         try:
             lm = LifecycleManager()
-            lm.stop_emulation(force=True)
+            for msg in lm.stop_emulation(force=True):
+                if isinstance(msg, str):
+                    logger.info(msg)
         except Exception as e:
             logger.error(f"Cleanup failed: {e}")
 

@@ -12,7 +12,8 @@ from network.manager import NetworkManager
 from network import ovs
 from emulation import generator
 
-logger = logging.getLogger("meco.lifecycle")
+from utils.logger import setup_logging
+logger = setup_logging("meco.lifecycle")
 
 # Dependency initialization
 # We keep these for local operations or as defaults
@@ -57,13 +58,20 @@ class LifecycleManager:
 
         if dry_run:
             logger.info("Dry run complete. No resources created.")
-            return True
+        if dry_run:
+            logger.info("Dry run complete. No resources created.")
+            yield "Dry run complete. No resources created."
+            yield {"success": True, "flows_inserted": False, "dry_run": True}
+            return
 
         # 1. Setup Infra
+        logger.info("Setting up infrastructure...")
+        yield "Setting up infrastructure..."
         net_manager.setup_infrastructure()
         
         # 2. Deploy Nodes
         try:
+            yield "Deploying nodes..."
             self._deploy_nodes(topology_data)
         except Exception as e:
             logger.error(f"Deployment failed: {e}")
@@ -72,7 +80,8 @@ class LifecycleManager:
 
         # 3. Configure Network (Port Mapping & Flows)
         try:
-            self._configure_network(topology_data)
+            yield "Configuring network flows..."
+            flows_inserted = self._configure_network(topology_data)
         except Exception as e:
             logger.error(f"Network configuration failed: {e}")
             self.stop_emulation(force=True)
@@ -82,30 +91,41 @@ class LifecycleManager:
         with open(ACTIVITY_FLAG, "w") as f:
             f.write(str(time.time()))
             
-        return True
+        # 4. Set Activity Flag
+        with open(ACTIVITY_FLAG, "w") as f:
+            f.write(str(time.time()))
+            
+        yield {"success": True, "flows_inserted": flows_inserted, "dry_run": False}
 
     def stop_emulation(self, force=True):
         if not os.path.exists(ACTIVITY_FLAG) and not force:
              logger.warning("No active emulation to shut down.")
-             return False
+             yield "No active emulation to shut down."
+             yield False
+             return
 
         logger.info("Shutting down emulation...")
+        yield "Identifying active instances..."
         
         # 1. Delete Instances
+        yield "Stopping instances..."
         self._delete_all_instances(force)
         
         # 2. Teardown Network
+        yield "Tearing down network infrastructure..."
         net_manager.teardown_infrastructure()
         
         # 3. Clear Flag
+        yield "Cleaning up..."
         if os.path.exists(ACTIVITY_FLAG):
             try:
                 os.remove(ACTIVITY_FLAG)
             except FileNotFoundError:
                 pass
-            
+        
         logger.info("Shutdown complete.")
-        return True
+        yield "Shutdown complete."
+        yield True
 
     def _deploy_nodes(self, data):
         nodes = data.get("nodes", [])
@@ -149,6 +169,7 @@ class LifecycleManager:
         Wait for instances to start, grouped by hypervisor to minimize remote calls.
         """
         logger.info("Waiting for all instances to reach Running state...")
+        
         
         # Group by client
         client_batches = defaultdict(list)
@@ -211,36 +232,56 @@ class LifecycleManager:
              
         def delete_on_client(item):
             name, client = item
+            logger.info(f"Checking for instances to clean up on {name}...")
             try:
                 instances = client.list_instances()
-                to_delete = [
-                    i["name"] for i in instances 
-                    if i.get("config", {}).get("user.meco") == "true"
-                ]
+                # logger.debug(f"Instances on {name}: {[i.get('name') for i in instances]}")
+                to_delete = []
+                for i in instances:
+                    # Log config for debugging if needed (at debug level)
+                    # logger.debug(f"Instance {i.get('name')} config: {i.get('config', {})}")
+                    is_meco = i.get("config", {}).get("user.meco") == "true"
+                    if is_meco:
+                        to_delete.append(i["name"])
+                
+                logger.info(f"Found {len(to_delete)} Meco instances on {name}: {to_delete}")
+                
                 for inst in to_delete:
-                    client.delete_instance(inst, force)
+                    logger.info(f"Deleting {inst} on {name}...")
+                    if client.delete_instance(inst, force):
+                        logger.info(f"Deleted {inst} on {name}")
+                    else:
+                        logger.error(f"Failed to delete {inst} on {name}")
             except Exception as e:
                 logger.warning(f"Error cleaning up on {name}: {e}")
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            pool.map(delete_on_client, self.clients.items())
+        logger.info(f"Triggering cleanup on clients: {list(self.clients.keys())}")
+        # Run sequentially for debugging
+        for item in self.clients.items():
+            delete_on_client(item)
+        logger.info("Cleanup iteration complete.")
 
     def _configure_network(self, data):
-        logger.info("Configuring network flows...")
+        logger.info("Configuring network flows (OF13)...")
         
-        # 1. Build Port Map (waits for IPs)
-        port_map = net_manager.build_port_map(timeout=60)
+        # New method handles waiting for IPs and flow generation
+        hv_rules = net_manager.generate_of13_rules_from_visibility(data, vlan_id=3)
         
-        if not port_map:
-             logger.warning("Port map empty. Skipping flow generation.")
-             return
+        if not hv_rules:
+             logger.warning("No flows generated or port map empty.")
+             # The new method returns empty dict on failure/empty map
+             # We should probably return False if it really failed, but empty might be valid for no visibility
+             # However, if port map failed, it logged error.
+             return False
 
-        # 2. Generate Flows
-        hv_rules = net_manager.generate_flows(data, port_map)
-        
-        # 3. Apply Flows
+        # Apply Flows
+        flows_inserted = False
         for hv, bridges in hv_rules.items():
             for br, rules in bridges.items():
-                logger.info(f"Applying {len(rules)} rules to {hv or 'local'}:{br}")
-                target = hv if hv else None
-                net_manager.apply_flows(br, rules, target=target)
+                if rules:
+                    logger.info(f"Applying {len(rules)} rules to {hv or 'local'}:{br}")
+                    target = hv if hv else None
+                    net_manager.apply_flows(br, rules, target=target)
+                    flows_inserted = True
+        
+        return flows_inserted

@@ -149,36 +149,70 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
                 logger.error("No valid input provided.")
                 return
 
-            response = stub.Start(request)
-            
-            msg = response.message.lower()
-            
-            if "incus not found" in msg or "install incus" in msg:
-                logger.error("Deployment failed: Incus is not installed on the server. Please install Incus (e.g. `sudo apt install incus`) and try again.")
-            elif "running" in msg:
-                # e.g. “Emulation based on X is running…”
-                logger.warning(msg)
-            elif "processing successful" in msg:
-                if "dry run" in msg:
-                    logger.info("Dry run passed: YAML is valid.")
+            try:
+                for response in stub.Start(request):
+                    if response.log_message:
+                        logger.info(response.log_message)
+                        
+                    if response.message:
+                        msg = response.message.lower()
+                        if "incus not found" in msg or "install incus" in msg:
+                            logger.error("Deployment failed: Incus is not installed on the server. Please install Incus (e.g. `sudo apt install incus`) and try again.")
+                        elif "running" in msg:
+                            # e.g. “Emulation based on X is running…”
+                            logger.warning(response.message)
+                        elif "instances were deployed" in msg and "no flows" in msg:
+                            logger.warning(response.message)  # Show as warning but not error, as instances are running
+                        elif "processing successful" in msg:
+                            if "dry run" in msg:
+                                logger.info("Dry run passed: YAML is valid.")
+                            else:
+                                logger.info("Deployment started successfully on Incus.")
+                        elif "emulation started successfully" in msg:
+                             logger.info("Deployment started successfully on Incus.")
+                        else:
+                            # Any other error message from the server
+                           if not response.success:
+                                logger.error(f"Deployment failed: {response.message}")
+                           else:
+                                logger.info(response.message)
+            except grpc.RpcError as e:
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    logger.error("Meco server is not running. Start it with 'meco on' first.")
                 else:
-                    logger.info("Deployment started successfully on Incus.")
-            else:
-                # Any other error message from the server
-                logger.error(f"Deployment failed: {msg}")
+                    logger.error(f"gRPC Error: {e.details()}")
+                sys.exit(1)
                 
         elif command == "shutdown":
-            response = stub.Shutdown(Empty())
-            if response.success:
-                logger.info(response.message)
-                try:
-                    # Get MECO-tagged instances and delete them
-                    for inst in get_running_instances():
-                        delete_instance(inst["name"])
-                except Exception as e:
-                    logger.error(f"Error during instance cleanup: {e}")
-            else:
-                logger.warning(response.message)
+            try:
+                server_shutdown_successful = False
+                for response in stub.Shutdown(Empty()):
+                    if response.log_message:
+                        logger.info(response.log_message)
+                    if response.message:
+                        if response.success:
+                            logger.info(response.message)
+                            server_shutdown_successful = True # At least one success message indicates server started shutdown
+                        else:
+                            logger.error(f"Shutdown failed: {response.message}")
+                
+                # Only attempt local instance cleanup if the server indicated a successful shutdown process
+                if server_shutdown_successful:
+                    try:
+                        # Get MECO-tagged instances and delete them
+                        for inst in get_running_instances():
+                            delete_instance(inst["name"])
+                    except Exception as e:
+                        logger.error(f"Error during instance cleanup: {e}")
+                else:
+                    logger.warning("Server shutdown did not complete successfully, skipping local instance cleanup.")
+
+            except grpc.RpcError as e:
+                logger.error(f"gRPC Error during shutdown: {e.details()}")
+                # If gRPC call itself failed, we might still try local cleanup if it's a connection issue
+                # or if the server might have partially processed the request before failing.
+                # For now, we'll just log the error and exit.
+                sys.exit(1)
 
     except grpc.RpcError as e:
         if e.code() == grpc.StatusCode.UNAVAILABLE:

@@ -1,116 +1,258 @@
+
 import logging
 import subprocess
-from infra.executors import CommandExecutor, LocalExecutor
+from config.loader import CONFIG
+from infra.executors import LocalExecutor
 
 logger = logging.getLogger("meco.ovs")
 
-# Default executor for OVS commands (usually local)
-# In future, this could be injectable if managing remote switches
+# Helper for execution
 EXECUTOR = LocalExecutor()
 
-def set_executor(executor: CommandExecutor):
+def set_executor(executor):
     global EXECUTOR
     EXECUTOR = executor
 
+def _run_raw(cmd, check=False, capture_output=True):
+    """
+    Executes a command using the global executor.
+    Arguments are adapted to match subprocess.run / executor.run style.
+    """
+    try:
+        # Ensure cmd is list
+        if isinstance(cmd, str):
+            cmd = cmd.split()
+            
+        result = EXECUTOR.run(cmd, check=check, capture_output=capture_output, text=True)
+        return result
+    except Exception as e:
+        # Wrap in a fake result object if executor raises directly, or re-raise
+        # But our code expects 'result.returncode' etc.
+        # If EXECUTOR.run raises CalledProcessError, we might want to catch it or let it bubble depending on 'check'
+        raise e
 
-def _run(cmd, check=True, target: str = None):
-    """
-    Runs the command. If target is provided, wraps as `incus exec target -- sudo ...`.
-    Note: cmd should already start with "sudo" if check=True implies local sudo usage.
-    However, meco.py prepends sudo manually.
-    Let's standardize: The input cmd list usually starts with "sudo". 
-    If target is provided, we construct `["incus", "exec", target, "--"] + cmd`.
-    """
-    final_cmd = cmd
+def _construct_cmd(base_cmd: list[str], target: str = None) -> list[str]:
+    """Wraps command for remote execution if target is specified."""
     if target:
-        # meco.py wraps "incus exec ... -- sudo ovs-..."
-        # The input 'cmd' usually is ["sudo", "ovs-...", ...]
-        # So prepending works fine.
-        final_cmd = ["incus", "exec", target, "--"] + cmd
-    
-    return EXECUTOR.run(final_cmd, check=check, capture_output=True, text=True)
+        return ["incus", "exec", target, "--"] + base_cmd
+    return base_cmd
 
 def bridge_exists(bridge: str, target: str = None) -> bool:
-    """Checks if an OVS bridge exists."""
-    cmd = ["sudo", "ovs-vsctl", "br-exists", bridge]
+    """Checks if an OVS bridge exists (target specific or local)."""
+    cmd = _construct_cmd(["sudo", "ovs-vsctl", "br-exists", bridge], target)
     try:
-        # ovs-vsctl br-exists returns 0 if exists, 2 if not
-        _run(cmd, check=True, target=target)
+        _run_raw(cmd, check=True)
         return True
     except Exception:
         return False
 
 def del_flows(bridge: str, target: str = None) -> bool:
-    """Deletes all flows from an OVS bridge."""
-    if not bridge_exists(bridge, target):
-        return True
-        
-    cmd = ["sudo", "ovs-ofctl", "del-flows", bridge]
+    """
+    Deletes all flows from an OVS bridge. 
+    If target is None, follows user logic: try local, then try all remotes (Broadcast cleanup?)
+    Refined: If target is None, we attempt to find the bridge? 
+    User's logic was: Try local, fail? Try remotes. 
+    Notes: User's intent for 'del_flows(br)' without target seems to be 'Cleanup everywhere'.
+    But for 'manager.py', target is usually passed.
+    """
+    # 1. Try Specific Target if provided
+    if target:
+        cmd = _construct_cmd(["sudo", "ovs-ofctl", "del-flows", bridge], target)
+        try:
+            _run_raw(cmd, check=True)
+            logger.info(f"Cleared flows from {bridge} on {target}")
+            return True
+        except Exception as e:
+            logger.debug(f"del-flows failed on {target} for {bridge}: {e}")
+            return False
+
+    # 2. Heuristic / Fallback (User Logic) if target=None
+    # Try Local
+    cmd_local = ["sudo", "ovs-ofctl", "del-flows", bridge]
     try:
-        _run(cmd, check=True, target=target)
-        return True
+        if _run_raw(cmd_local, check=True).returncode == 0:
+             logger.info(f"Cleared flows from {bridge} (local)")
+             return True
     except Exception as e:
-        logger.error(f"Failed to delete flows from bridge {bridge} (target={target}): {e}")
-        return False
+        logger.debug(f"Local del-flows failed: {e} - trying remotes")
+
+    # Try Remotes
+    hypervisors = CONFIG.get("hypervisors", {})
+    for hv in hypervisors:
+         cmd_remote = _construct_cmd(["sudo", "ovs-ofctl", "del-flows", bridge], hv)
+         try:
+             _run_raw(cmd_remote, check=True)
+             logger.info(f"Cleared flows from {bridge} on {hv}")
+             return True # Return on first success? User code returns True.
+         except Exception:
+             continue
+             
+    logger.error(f"Failed to delete flows from {bridge} (tried local + remotes)")
+    return False
 
 def add_flow(bridge: str, flow_rule: str, target: str = None) -> bool:
-    """Adds a flow rule to an OVS bridge."""
-    cmd = ["sudo", "ovs-ofctl", "add-flow", bridge, flow_rule]
+    """Adds a flow rule."""
+    base_cmd = ["sudo", "ovs-ofctl", "add-flow", bridge, flow_rule]
+    logger.debug(f"Adding flow to {bridge} (target={target}): {flow_rule}")
+    
+    if target:
+        cmd = _construct_cmd(base_cmd, target)
+        try:
+            _run_raw(cmd, check=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add flow on {target}: {e}")
+            return False
+            
+    # Fallback/Search
+    # Try local
     try:
-        _run(cmd, check=True, target=target)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to add flow rule to {bridge} ({flow_rule}) (target={target}): {e}")
-        return False
-
-def list_ports(bridge: str, target: str = None) -> list[str]:
-    """Lists ports on an OVS bridge."""
-    if not bridge_exists(bridge, target):
-        return []
-        
-    cmd = ["sudo", "ovs-vsctl", "list-ports", bridge]
-    try:
-        result = _run(cmd, target=target)
-        return result.stdout.strip().splitlines()
-    except Exception as e:
-        # If bridge disappears during race, just return empty
-        if "no bridge named" in str(e).lower(): return []
-        logger.error(f"Failed to list ports on bridge {bridge} (target={target}): {e}")
-        return []
-
-def del_port(bridge: str, port: str, target: str = None) -> bool:
-    """Deletes a port from an OVS bridge."""
-    cmd = ["sudo", "ovs-vsctl", "--if-exists", "del-port", bridge, port]
-    try:
-        _run(cmd, check=True, target=target)
-        return True
-    except Exception as e:
-        logger.error(f"Failed to delete port {port} from bridge {bridge} (target={target}): {e}")
-        return False
-
-def port_to_br(port: str, target: str = None) -> str | None:
-    """Gets the bridge a port is attached to."""
-    cmd = ["sudo", "ovs-vsctl", "port-to-br", port]
-    try:
-        result = _run(cmd, check=False, target=target)
-        bridge = result.stdout.strip()
-        return bridge if bridge else None
-    except Exception:
-        return None
-
-def get_interface_ofport(interface: str, target: str = None) -> int | None:
-    """Gets the OpenFlow port number for an OVS interface."""
-    cmd = ["sudo", "ovs-vsctl", "get", "Interface", interface, "ofport"]
-    try:
-        result = _run(cmd, target=target)
-        port_str = result.stdout.strip()
-        # Handle cases where output might be multiple lines or error msg
-        if "\n" in port_str: 
-             port_str = port_str.split("\n")[-1] # Try last line if noise? usually strictly number
-             
-        if port_str.lstrip("-").isdigit(): # supports negative like -1
-            return int(port_str)
+        if _run_raw(base_cmd, check=True).returncode == 0:
+            logger.info(f"Added flow to {bridge} (local)")
+            return True
     except Exception:
         pass
+        
+    for hv in CONFIG.get("hypervisors", {}):
+        cmd = _construct_cmd(base_cmd, hv)
+        try:
+            _run_raw(cmd, check=True)
+            logger.info(f"Added flow to {bridge} on {hv}")
+            return True
+        except Exception:
+            pass
+            
+    logger.error(f"Failed to add flow to {bridge}")
+    return False
+
+def list_ports(bridge: str, target: str = None) -> list[str]:
+    """Lists ports."""
+    base_cmd = ["sudo", "ovs-vsctl", "list-ports", bridge]
+    
+    if target:
+        cmd = _construct_cmd(base_cmd, target)
+        try:
+            res = _run_raw(cmd, check=True)
+            return res.stdout.strip().splitlines()
+        except Exception:
+            return []
+            
+    # Fallback
+    try:
+        res = _run_raw(base_cmd, check=True)
+        return res.stdout.strip().splitlines()
+    except Exception:
+        pass
+        
+    for hv in CONFIG.get("hypervisors", {}):
+        cmd = _construct_cmd(base_cmd, hv)
+        try:
+            res = _run_raw(cmd, check=True)
+            return res.stdout.strip().splitlines()
+        except Exception:
+            continue
+    return []
+
+def del_port(bridge: str, port: str, target: str = None) -> bool:
+    base_cmd = ["sudo", "ovs-vsctl", "--if-exists", "del-port", bridge, port]
+    
+    if target:
+        try:
+            _run_raw(_construct_cmd(base_cmd, target), check=True)
+            return True
+        except Exception:
+            return False
+            
+    try:
+        _run_raw(base_cmd, check=True)
+        return True
+    except Exception:
+        pass
+        
+    for hv in CONFIG.get("hypervisors", {}):
+        try:
+            _run_raw(_construct_cmd(base_cmd, hv), check=True)
+            return True
+        except Exception:
+            pass
+    return False
+
+def port_to_br(port: str, target: str = None) -> str | None:
+    """Gets the bridge a port is attached to. Uses search fallback if target fails."""
+    base_cmd = ["sudo", "ovs-vsctl", "port-to-br", port]
+    
+    # helper
+    def parse(res):
+        val = res.stdout.strip()
+        return val if val else None
+
+    if target:
+        try:
+            res = _run_raw(_construct_cmd(base_cmd, target), check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                return parse(res)
+        except Exception:
+            pass
+            
+    # Fallback / Search
+    # 1. Local
+    try:
+        res = _run_raw(base_cmd, check=False)
+        if res.returncode == 0 and res.stdout.strip():
+            logger.debug(f"Found {port} on (local) bridge {res.stdout.strip()}")
+            return parse(res)
+    except Exception:
+        pass
+        
+    # 2. Remotes
+    for hv in CONFIG.get("hypervisors", {}):
+        try:
+            # Skip if we already checked this target in the 'if target:' block? 
+            # Well, safe to re-check or just proceed.
+            cmd = _construct_cmd(base_cmd, hv)
+            res = _run_raw(cmd, check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                logger.debug(f"Found {port} on {hv} bridge {res.stdout.strip()}")
+                return parse(res)
+        except Exception:
+            continue
+            
     return None
 
+def get_interface_ofport(interface: str, target: str = None) -> int | None:
+    """Gets OFPort. Uses search fallback."""
+    base_cmd = ["sudo", "ovs-vsctl", "get", "Interface", interface, "ofport"]
+    
+    def parse(res):
+        val = res.stdout.strip()
+        # Handle potential noise
+        if "\n" in val: val = val.split("\n")[-1]
+        if val.lstrip("-").isdigit():
+            return int(val)
+        return None
+
+    if target:
+        try:
+            res = _run_raw(_construct_cmd(base_cmd, target), check=False)
+            v = parse(res)
+            if v is not None: return v
+        except Exception:
+            pass
+            
+    # Search
+    try:
+        res = _run_raw(base_cmd, check=False)
+        v = parse(res)
+        if v is not None: return v
+    except Exception:
+        pass
+        
+    for hv in CONFIG.get("hypervisors", {}):
+        try:
+            res = _run_raw(_construct_cmd(base_cmd, hv), check=False)
+            v = parse(res)
+            if v is not None: return v
+        except Exception:
+            pass
+            
+    return None

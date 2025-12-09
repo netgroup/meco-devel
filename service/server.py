@@ -15,7 +15,8 @@ except ImportError:
 from emulation.lifecycle import LifecycleManager
 from config.validator import validate_topology
 
-logger = logging.getLogger("meco.service")
+from utils.logger import setup_logging
+logger = setup_logging("meco.service")
 
 lifecycle = LifecycleManager()
 
@@ -34,13 +35,15 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
             elif request.HasField("client_file_content"):
                 content = request.client_file_content
             else:
-                return meco_pb2.StartResponse(success=False, message="No content provided")
+                yield meco_pb2.StartResponse(success=False, message="No content provided")
+                return
 
             # 2. Parse & Validate
             parsed_yaml = yaml.safe_load(content)
             validation = validate_topology(parsed_yaml)
             if not validation["success"]:
-                return meco_pb2.StartResponse(success=False, message=validation["message"])
+                yield meco_pb2.StartResponse(success=False, message=validation["message"])
+                return
 
             # 3. Save as (optional)
             if request.save_as:
@@ -48,23 +51,38 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
                 pass
 
             # 4. Execute
-            lifecycle.start_emulation(parsed_yaml, dry_run=request.dry_run)
-            
-            msg = "Emulation started successfully." if not request.dry_run else "Validation passed (Dry run)."
-            return meco_pb2.StartResponse(success=True, message=msg)
+            for item in lifecycle.start_emulation(parsed_yaml, dry_run=request.dry_run):
+                if isinstance(item, str):
+                    yield meco_pb2.StartResponse(success=True, log_message=item)
+                elif isinstance(item, dict):
+                    result = item
+                    # Formulate message based on result
+                    if result.get("dry_run"):
+                         msg = "Validation passed (Dry run)."
+                    elif result.get("flows_inserted"):
+                         msg = "Emulation started successfully."
+                    else:
+                         msg = "Instances were deployed and reached Running state, but no flows were inserted (Port map empty)."
+                    
+                    yield meco_pb2.StartResponse(success=True, message=msg)
 
         except Exception as e:
             logger.error(f"Start RPC failed: {e}")
-            return meco_pb2.StartResponse(success=False, message=str(e))
+            yield meco_pb2.StartResponse(success=False, message=str(e))
 
     def Shutdown(self, request, context):
         try:
-            success = lifecycle.stop_emulation(force=True)
-            msg = "Emulation stopped." if success else "Shutdown failed or no active emulation."
-            return meco_pb２.ShutdownResponse(success=success, message=msg)
+            for item in lifecycle.stop_emulation(force=True):
+                if isinstance(item, str):
+                    yield meco_pb2.ShutdownResponse(success=True, log_message=item)
+                elif isinstance(item, bool):
+                    success = item
+                    msg = "Emulation stopped." if success else "Shutdown failed or no active emulation."
+                    yield meco_pb2.ShutdownResponse(success=success, message=msg)
+                    
         except Exception as e:
             logger.error(f"Shutdown RPC failed: {e}")
-            return meco_pb2.ShutdownResponse(success=False, message=str(e))
+            yield meco_pb2.ShutdownResponse(success=False, message=str(e))
 
     def MecoCall(self, request, context):
         return meco_pb2.MecoResponse(message=f"Echo: {request.message}")
