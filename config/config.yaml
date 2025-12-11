@@ -30,14 +30,12 @@ hypervisors:
       - "1-Satellite"
       - "2-Terminal"
       - "3-Terminal"
+    ip: "10.55.0.186"
+  hv2:
+    instances:
       - "4-Terminal"
       - "5-Terminal"
-    ip: "10.55.0.186"
-  # hv2:
-  #   instances:
-  #     - "3-Terminal"
-  #     - "4-Terminal"
-  #   ip: "10.55.0.225"
+    ip: "10.55.0.225"
   # hv3:
   #   instances:
   #     # - "4-GroundStation"

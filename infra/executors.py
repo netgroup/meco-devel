@@ -95,15 +95,23 @@ class SshExecutor(CommandExecutor):
 
     def upload_file(self, local_path: str, remote_path: str) -> bool:
         target = f"{self.user}@{self.host}" if self.user else self.host
-        scp_cmd = ["scp", "-P", str(self.port)]
+        # -B: Batch mode (prevents asking for passwords/passphrases)
+        # -P: Port
+        scp_cmd = ["scp", "-B", "-P", str(self.port)]
+        
         if self.identity_file:
             scp_cmd.extend(["-i", self.identity_file])
+            
+        # Add host key checking bypass to match run() behavior
+        scp_cmd.extend(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
             
         scp_cmd.extend([local_path, f"{target}:{remote_path}"])
         
         try:
+            # Capture output to log stderr on failure
             subprocess.run(scp_cmd, check=True, capture_output=True)
             return True
         except subprocess.CalledProcessError as e:
-            logger.error(f"SCP failed: {e}")
+            err_msg = e.stderr.decode().strip() if e.stderr else str(e)
+            logger.error(f"SCP failed: {err_msg}")
             return False

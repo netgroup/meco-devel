@@ -128,11 +128,13 @@ def server_off(force=False):
     """Stops the server and cleans up."""
     logger.info("Stopping Meco server...")
 
-    if os.path.exists(ACTIVITY_FLAG):
-        if not force:
-            logger.warning("Active emulation detected. Use 'meco off --force' to force stop.")
-            return
-        logger.info("Force stop requested. Cleaning up emulation...")
+    if os.path.exists(ACTIVITY_FLAG) and not force:
+        logger.warning("Active emulation detected. Use 'meco off --force' to force stop.")
+        return
+
+    if os.path.exists(ACTIVITY_FLAG) or force:
+        if force:
+            logger.info("Force stop requested. Cleaning up emulation...")
         try:
             lm = LifecycleManager()
             for msg in lm.stop_emulation(force=True):
