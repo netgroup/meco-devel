@@ -40,12 +40,12 @@ def sample_topology():
 class TestNetworkManagerOF13:
     
     @patch("network.manager.NetworkManager.build_port_map")
-    def test_generate_of13_rules(self, mock_build_map, net_manager, mock_port_map, sample_topology):
+    def test_generate_visibility_rules(self, mock_build_map, net_manager, mock_port_map, sample_topology):
         # Setup mock
         mock_build_map.return_value = mock_port_map
         
         # Run
-        rules = net_manager.generate_of13_rules_from_visibility(sample_topology, vlan_id=10)
+        rules = net_manager.generate_visibility_rules(sample_topology, vlan_id=10)
         
         # Assertions
         assert "hv1" in rules
@@ -87,18 +87,21 @@ class TestNetworkManagerOF13:
         assert term3_up
         
     @patch("network.manager.NetworkManager.build_port_map")
-    def test_generate_of13_rules_no_links(self, mock_build_map, net_manager, mock_port_map):
+    def test_generate_visibility_rules_no_links(self, mock_build_map, net_manager, mock_port_map):
         mock_build_map.return_value = mock_port_map
         topo = {"nodes": [], "visibility-ground": []}
         
-        rules = net_manager.generate_of13_rules_from_visibility(topo)
+        rules = net_manager.generate_visibility_rules(topo)
         assert rules == {} # No links
 
     @patch("network.manager.NetworkManager.build_port_map")
-    def test_generate_of13_rules_cross_domain_skip(self, mock_build_map, net_manager, mock_port_map, sample_topology):
+    def test_generate_visibility_rules_cross_domain(self, mock_build_map, net_manager, mock_port_map, sample_topology):
         mock_build_map.return_value = mock_port_map
         
-        # hv2 should NOT have rules because sat 1 is on hv1, and term 4 is on hv2
-        rules = net_manager.generate_of13_rules_from_visibility(sample_topology)
+        # hv2 SHOULD now have rules (Scenario C for Terminal 4)
+        rules = net_manager.generate_visibility_rules(sample_topology)
         
-        assert "hv2" not in rules
+        assert "hv2" in rules
+        assert "br-int" in rules["hv2"]
+        # Term 4 is port 4. Should check for uplink to patch-tun
+        assert any("in_port=4" in f and "output:patch-tun" in f for f in rules["hv2"]["br-int"])
