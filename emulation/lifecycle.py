@@ -265,7 +265,7 @@ class LifecycleManager:
         logger.info("Configuring network flows (OF13)...")
         
         # New method handles waiting for IPs and flow generation
-        hv_rules = net_manager.generate_of13_rules_from_visibility(data, vlan_id=3)
+        hv_rules = net_manager.generate_visibility_rules(data, vlan_id=3)
         
         if not hv_rules:
              logger.warning("No flows generated or port map empty.")

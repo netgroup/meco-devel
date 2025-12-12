@@ -16,9 +16,12 @@ from emulation.lifecycle import LifecycleManager
 from config.validator import validate_topology
 
 from utils.logger import setup_logging
+from service.monitor import HypervisorMonitor
+
 logger = setup_logging("meco.service")
 
 lifecycle = LifecycleManager()
+monitor = HypervisorMonitor()
 
 class MecoService(meco_pb2_grpc.MecoServiceServicer):
     """
@@ -93,4 +96,11 @@ def serve(port=50051, max_workers=10):
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     logger.info(f"Meco gRPC server started on port {port}.")
+    
+    # Start Monitor
+    monitor.start()
+    
     server.wait_for_termination()
+    
+    # Stop Monitor on exit
+    monitor.stop()
