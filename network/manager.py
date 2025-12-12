@@ -58,10 +58,26 @@ class NetworkManager:
 
                     # Setup profiles on this remote
                     self._setup_profiles(remote)
+                    self._setup_patch_ports(remote)
+                    
+                    # Setup Tunnels (Full Mesh)
+                    self._setup_tunnels(remote, hypervisors)
+                    
+                    # Apply Base Rules
+                    for net in needed_nets:
+                        base_flows = self.generate_base_rules(net)
+                        self.apply_flows(net, base_flows, target=remote, clear_existing=True)
 
             if not hypervisors:
                 # 2. Setup Profiles (Local)
                 self._setup_profiles()
+                self._setup_patch_ports()
+                
+                # Apply Base Rules (Local)
+                needed_nets = [self.bridge_internal, self.bridge_tunnel]
+                for net in needed_nets:
+                    base_flows = self.generate_base_rules(net)
+                    self.apply_flows(net, base_flows, clear_existing=True)
                 
             logger.info("Network infrastructure setup complete.")
             return True
@@ -139,9 +155,125 @@ class NetworkManager:
         if not incus_client.profile_exists(p_vm):
             incus_client.copy_profile(p_cnt, p_vm)
 
-    def apply_flows(self, bridge: str, flows: list, target: str = None):
-        """Applies a list of OpenFlow rules."""
-        ovs.del_flows(bridge, target=target)
+    def _setup_patch_ports(self, remote: str = None):
+        """Creates patch ports between br-int and br-tun."""
+        # br-int: patch-tun -> br-tun
+        # br-tun: patch-int -> br-int
+        logger.info(f"Setting up patch ports on {remote or 'local'}...")
+        
+        ok1 = ovs.add_patch_port(self.bridge_internal, "patch-tun", "patch-int", target=remote)
+        ok2 = ovs.add_patch_port(self.bridge_tunnel, "patch-int", "patch-tun", target=remote)
+        
+        if not (ok1 and ok2):
+             logger.warning(f"Failed to setup patch ports nicely on {remote}")
+
+    def _setup_tunnels(self, current_hv: str, all_hypervisors: dict):
+        """
+        Sets up VXLAN tunnels from current_hv to all other hypervisors.
+        Port name format: vxlan-<remote_alias>
+        """
+        if not current_hv: return # Local only setup handled differently or ignored?
+        
+        logger.info(f"Setting up tunnels on {current_hv}...")
+        
+        for other_hv, data in all_hypervisors.items():
+            if other_hv == current_hv: continue
+            
+            # Get peer IP
+            peer_ip = data.get("ip") or data.get("host")
+            if not peer_ip:
+                logger.warning(f"Skipping tunnel to {other_hv} (no IP found)")
+                continue
+                
+            port_name = f"vxlan-{other_hv}"
+            logger.info(f"Creating tunnel {port_name} on {current_hv} -> {peer_ip}")
+            
+            # Add port to br-tun
+            # Use key=flow (default in ovs helper is flow) or fixed key?
+            # User design doc says: "TUN_ID: VXLAN Tunnel ID (VNI) for remote connections (e.g., 0x17)"
+            # This implies flow-based tunneling (options:key=flow) where we set tunnel_id in flow actions.
+            ovs.add_vxlan_port(self.bridge_tunnel, port_name, peer_ip, key="flow", target=current_hv)
+
+    def generate_base_rules(self, bridge: str) -> List[str]:
+        """
+        Returns static initialized rules for br-int or br-tun.
+        """
+        rules = []
+        if bridge == self.bridge_internal:
+            # --- br-int ---
+            # [Table 0] DHCP Bypass (Allow 67/68 to NORMAL)
+            # Essential for initial IP assignment before custom rules kick in.
+            rules.append("table=0,priority=1000,udp,tp_src=68,tp_dst=67,actions=NORMAL")
+            rules.append("table=0,priority=1000,udp,tp_src=67,tp_dst=68,actions=NORMAL")
+
+            # [Table 0] Ingress from Patch Port (Remote Traffic)
+            rules.append("table=0,priority=1,in_port=patch-tun,actions=resubmit(,4)")
+            
+            # [Table 4] Remote Traffic Processing
+            # Default: Resubmit to Table 20 (Unicast Auto-learning)
+            rules.append("table=4,priority=0,actions=resubmit(,20)")
+            # Handle Broadcast/Multicast (BUM) from Remote
+            rules.append("table=4,priority=1,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00,actions=resubmit(,22)")
+            
+            # [Table 5] Local Traffic Processing
+            # Default: Resubmit to Table 20
+            rules.append("table=5,priority=0,actions=resubmit(,20)")
+            # Handle Broadcast/Multicast (BUM) locally
+            rules.append("table=5,priority=1,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00,actions=resubmit(,22)")
+            
+            # [Table 9] Learning Logic (Term -> Sat)
+            # Learn Source MAC and VLAN
+            rules.append(
+                "table=9,priority=1,actions="
+                "learn(table=20,priority=1,hard_timeout=60,"
+                "NXM_OF_VLAN_TCI[0..11],"
+                "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
+                "load:NXM_OF_VLAN_TCI[]->NXM_OF_VLAN_TCI[],"
+                "output:NXM_OF_IN_PORT[])"
+            )
+            
+            # [Table 20] Unicast Auto-Learning Fallback -> BUM
+            rules.append("table=20,priority=0,actions=resubmit(,22)")
+            
+            # [Table 22] Flooding/Drop -> Default Drop
+            rules.append("table=22,priority=0,actions=drop")
+            
+        elif bridge == self.bridge_tunnel:
+            # --- br-tun ---
+            # [Table 0] Ingress from Patch Port (Local Traffic)
+            rules.append("table=0,priority=1,in_port=patch-int,actions=resubmit(,5)")
+            
+            # [Table 5] Mirror br-int structure
+            rules.append("table=5,priority=0,actions=resubmit(,20)")
+            rules.append("table=5,priority=1,dl_dst=01:00:00:00:00:00/01:00:00:00:00:00,actions=resubmit(,22)")
+            
+            # [Table 20]
+            rules.append("table=20,priority=0,actions=resubmit(,22)")
+            
+            # [Table 22] Drop
+            rules.append("table=22,priority=0,actions=drop")
+            
+            # [Table 9] Learning Logic (Remote -> Local) - Map VXLAN ID
+            rules.append(
+                "table=9,priority=1,actions="
+                "learn(table=20,priority=1,hard_timeout=60,"
+                "NXM_OF_VLAN_TCI[0..11],"
+                "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
+                "load:0->NXM_OF_VLAN_TCI[],"
+                "load:NXM_NX_TUN_ID[]->NXM_NX_TUN_ID[],"
+                "output:NXM_OF_IN_PORT[])"
+            )
+
+        return rules
+
+    def apply_flows(self, bridge: str, flows: list, target: str = None, clear_existing: bool = False):
+        """
+        Applies a list of OpenFlow rules.
+        :param clear_existing: If True, deletes all flows on the bridge before applying.
+        """
+        if clear_existing:
+            ovs.del_flows(bridge, target=target)
+            
         for rule in flows:
             ovs.add_flow(bridge, rule, target=target)
 
@@ -273,163 +405,220 @@ class NetworkManager:
         return {h: dict(b) for h, b in hv_bridge_rules.items()}
 
 
-    def generate_of13_rules_from_visibility(
-        self, topo: dict, vlan_id: int | None = None
+    def generate_visibility_rules(
+        self, topo: dict, vlan_id: int = 0x03, tun_id: int = 0x17
     ) -> Dict[str, Dict[str, List[str]]]:
         """
-        Build OpenFlow 1.3 rules per hypervisor/bridge from the topology visibility.
-
-        Returns a mapping: { hypervisor: { bridge: [flow_string, ...] } }
+        Generates OpenFlow rules based on visibility (Scenarios A, B, C).
+        Refactored to follow "Rules Template Structure" with specific cookie/VLAN management.
         """
-        # Compute current port mappings (includes hypervisor, bridge, ofport)
-        # Using build_port_map as the waiter
-        expected_nodes = len(topo.get("nodes", []))
-        port_map = self.build_port_map(expected_count=expected_nodes, timeout=120)
+        port_map = self.build_port_map(expected_count=len(topo.get("nodes", [])), timeout=120)
         if not port_map:
-            logger.error("[OF13] No port map available. Cannot generate rules.")
+            logger.error("No port map available. Cannot generate visibility rules.")
             return {}
 
-        # Build node type map by id
         node_type: Dict[int, str] = {}
         for n in topo.get("nodes", []):
             try:
-                nid = int(n.get("id"))
-                node_type[nid] = str(n.get("type", "")).lower()
-            except Exception:
-                continue
+                node_type[int(n.get("id"))] = str(n.get("type", "")).lower()
+            except: continue
 
-        # Collect visibility links (undirected for grouping; direction used when building rules)
         links = self._collect_topology_links(topo)
-        if not links:
-            logger.warning("[OF13] No visibility links; nothing to generate.")
-            return {}
-
-        # Index port_map entries by node id for eth0 ("id:0")
-        def pm_entry(node_id: int):
-            return port_map.get(f"{node_id}:0")  # (hv, br, port)
-
-        # Group terminals per satellite on each (hypervisor,bridge)
-        # sat_groups[(hv,br,sat_id)] = { 'sat_port': int, 'term_ports': [int,...] }
-        sat_groups: dict[tuple[str, str, int], dict[str, object]] = {}
-
-        for a, b in links:
-            a_type = node_type.get(a, "")
-            b_type = node_type.get(b, "")
-            # Normalise as satellite-terminal pairs; ignore other types for now
-            if a_type == "satellite" and b_type == "terminal":
-                sat_id, te_id = a, b
-            elif b_type == "satellite" and a_type == "terminal":
-                sat_id, te_id = b, a
-            else:
-                # Skip unsupported link types in this helper
-                continue
-
-            sat_pm = pm_entry(sat_id)
-            te_pm = pm_entry(te_id)
-            if not sat_pm or not te_pm:
-                logger.debug(f"[OF13] Skip pair {sat_id}<->{te_id}: missing port map.")
-                continue
-            sat_hv, sat_br, sat_port = sat_pm
-            te_hv, te_br, te_port = te_pm
-
-            # Must be on same hypervisor and bridge to wire directly
-            if sat_hv != te_hv or sat_br != te_br:
-                logger.warning(
-                    f"[OF13] {sat_id}(sat) and {te_id}(term) on different domains: {sat_hv}/{sat_br} vs {te_hv}/{te_br}; skipping."
-                )
-                continue
-
-            key = (sat_hv, sat_br, sat_id)
-            grp = sat_groups.get(key)
-            if not grp:
-                grp = {"sat_port": sat_port, "term_ports": []}
-                sat_groups[key] = grp
-            grp["term_ports"].append(te_port)
-
-        # Assemble flows per hypervisor/bridge
-        hv_bridge_rules: dict[str, dict[str, list[str]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
-
-        # Default VLAN id (matches example if not provided)
-        vlan = vlan_id if vlan_id is not None else 3
-
-        # Prepare shared baseline + learn rule per hv/bridge (add once)
-        baseline_cache = set()  # (hv, br)
         
-        # Collect all ports per (hv, br) for ARP handling
-        hv_br_ports: dict[tuple[str, str], set[int]] = defaultdict(set)
-        for (hv, br, sat_id), grp in sat_groups.items():
-            hv_br_ports[(hv, br)].add(grp["sat_port"])
-            hv_br_ports[(hv, br)].update(grp["term_ports"])
+        # Helper to get port info: (hv, br, port)
+        def pm(nid): return port_map.get(f"{nid}:0")
 
-        for (hv, br, sat_id), grp in sat_groups.items():
-            sat_port = grp["sat_port"]
-            term_ports: list[int] = sorted(set(grp["term_ports"]))
-            if not term_ports:
+        # Result structure: hv -> bridge -> rules
+        rules: Dict[str, Dict[str, List[str]]] = defaultdict(lambda: defaultdict(list))
+        
+        # 1. Group nodes by Hypervisor and Satellite
+        # We need a structure: hv -> satellites -> [local_terms, remote_terms_by_hv]
+        # This aligns with the "Group nodes by hypervisor" logic in the user's snippet.
+        
+        # Determine Satellites and their connections
+        sat_data = defaultdict(lambda: {"local_terms": [], "remote_terms": []}) 
+        # Key: (sat_hv, sat_id), Value: lists of term dictionaries
+        
+        # Assign unique VLAN/Tunnel ID per Satellite
+        # Start at 0x10 or so to avoid conflicts with reserved VLANs
+        current_vlan = 0x10
+        sat_conf = {} # sat_id -> {vlan, tun, cookie_base}
+        
+        for a, b in links:
+            a_type, b_type = node_type.get(a), node_type.get(b)
+            if a_type == "satellite" and b_type == "terminal":
+                sat_id, term_id = a, b
+            elif b_type == "satellite" and a_type == "terminal":
+                sat_id, term_id = b, a
+            else:
                 continue
 
-            # 0) Baseline pipeline tables, ARP rules, and learn rule (once per hv/br)
-            if (hv, br) not in baseline_cache:
-                # Add ARP broadcast rules FIRST (highest priority at table 0)
-                all_ports_here = sorted(hv_br_ports[(hv, br)])
-                logger.info(f"[OF13] Adding ARP rules for {hv}/{br} with ports: {all_ports_here}")
-                
-                for in_p in all_ports_here:
-                    other_ports = [p for p in all_ports_here if p != in_p]
-                    if other_ports:
-                        arp_output_str = ",".join(f"output:{p}" for p in other_ports)
-                        hv_bridge_rules[hv][br].append(
-                            f"table=0,priority=200,in_port={in_p},arp,actions={arp_output_str}"
-                        )
-                
-                # Then add baseline tables
-                hv_bridge_rules[hv][br].extend(
-                    [
-                        # Default drop table
-                        "table=22,priority=0,actions=drop",
-                        # Unicast resolution table (learned entries). If miss, go to flood/mirror table 5.
-                        "table=20,priority=0,actions=resubmit(,5)",
-                        # Flood/mirror table. If miss here, drop.
-                        "table=5,priority=0,actions=resubmit(,22)",
-                        # Learn rule: TERM source MAC gets learned to table 20
-                        (
-                            "table=9,priority=1,actions="
-                            "learn(table=20,priority=1,hard_timeout=60,"
-                            "NXM_OF_VLAN_TCI[0..11],"
-                            "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
-                            "load:NXM_OF_VLAN_TCI[]->NXM_OF_VLAN_TCI[],"
-                            "output:NXM_OF_IN_PORT[])"
-                        ),
-                    ]
-                )
-                baseline_cache.add((hv, br))
+            # Resolve Satellite
+            s_info = pm(sat_id)
+            if not s_info: continue
+            sat_hv, sat_br, sat_port = s_info
+            
+            # Resolve Terminal
+            t_info = pm(term_id)
+            if not t_info: continue
+            term_hv, term_br, term_port = t_info
+            
+            # Init config if missing
+            if sat_id not in sat_conf:
+                sat_conf[sat_id] = {
+                    "vlan": current_vlan,
+                    "tun": current_vlan + 1000, # arbitrary mapping
+                    "cookie_base": sat_id # Use ID as base (e.g. 1 -> 0x1..)
+                }
+                current_vlan += 1
+            
+            term_obj = {
+                "id": term_id, "hv": term_hv, "br": term_br, "port": term_port, 
+                "sat_id": sat_id # Link back
+            }
+            
+            if sat_hv == term_hv:
+                sat_data[(sat_hv, sat_id)]["local_terms"].append(term_obj)
+            else:
+                sat_data[(sat_hv, sat_id)]["remote_terms"].append(term_obj)
 
-            # 1) SAT -> pipeline entry (table 0) with VLAN tag, then consult learned unicast (table 20)
-            hv_bridge_rules[hv][br].append(
-                f"cookie=0x102,table=0,priority=100,in_port={sat_port},vlan_tci=0,"
-                f"actions=load:0x{vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,20)"
+        
+        # 2. Generate Rules using Template Logic
+        for (sat_hv, sat_id), conn_data in sat_data.items():
+            conf = sat_conf[sat_id]
+            s_vlan = conf["vlan"]
+            s_tun = conf["tun"]
+            c_base = conf["cookie_base"] # ID (int)
+            
+            # Resolve Sat Port again
+            _, _, sat_port = pm(sat_id)
+            
+            local_terms = conn_data["local_terms"]
+            remote_terms = conn_data["remote_terms"]
+            
+            # --- LOCAL SATELLITE RULES (br-int) ---
+            
+            # 1. Local Downlink (Sat -> VLAN -> Resubmit 5)
+            # Template: 0x{{cookie_base}}00
+            c_down = f"0x{c_base}00" 
+            rules[sat_hv]["br-int"].append(
+                f"cookie={c_down},table=0,priority=1,in_port={sat_port},vlan_tci=0,"
+                f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,5)"
             )
-
-            # 2) Downlink replicate SAT -> all terminals for this group (clear VLAN before output)
-            actions = []
-            for te_p in term_ports:
-                actions.append("load:0->NXM_OF_VLAN_TCI[]")
-                actions.append(f"output:{te_p}")
-            hv_bridge_rules[hv][br].append(
-                "cookie=0x103,table=5,priority=100,"
-                f"vlan_tci=0x{vlan:x}/0x0fff,actions=" + ",".join(actions)
-            )
-
-            # 3-4) Uplink TERM -> SAT per terminal: tag, learn (resubmit to 9), clear tag, output SAT
-            for idx, te_p in enumerate(term_ports, start=0):
-                cookie = 0x100 + idx  # simple per-entry cookie
-                hv_bridge_rules[hv][br].append(
-                    f"cookie=0x{cookie:x},table=0,priority=100,in_port={te_p},vlan_tci=0,"
-                    f"actions=load:0x{vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),load:0->NXM_OF_VLAN_TCI[],output:{sat_port}"
+            
+            # 2. Terminal Uplinks (Local Terms only per template)
+            # Template: 0x{{cookie_base}}01
+            # "for each local terminal: generate terminal_uplink"
+            c_up = f"0x{c_base}01"
+            for t in local_terms:
+                rules[sat_hv]["br-int"].append(
+                    f"cookie={c_up},table=0,priority=1,in_port={t['port']},vlan_tci=0,"
+                    f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),"
+                    f"load:0->NXM_OF_VLAN_TCI[],output:{sat_port}"
+                )
+                
+            # 3. Remote Downlink Distribution (Table 22)
+            # "for each remote terminal... generate remote_downlink_to_bridge"
+            # Actually template groups them all in one rule? 
+            # "actions: [local terms], [patch-tun if remote]"
+            # This rule triggers on Sat Port + VLAN match in Table 22.
+            # So one rule per Satellite.
+            
+            actions_22 = []
+            # Local terminals
+            for t in local_terms:
+                actions_22.append("load:0->NXM_OF_VLAN_TCI[]")
+                actions_22.append(f"output:{t['port']}")
+            
+            # Remote terminals (output to tunnel bridge)
+            # Logic: If ANY remote terminals exist, flood to patch-tun?
+            # Or strict? Template says "Remote terminals (via tunnel)... load:vlan... output:patch-tun"
+            if remote_terms:
+                actions_22.append(f"load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[]")
+                actions_22.append("output:patch-tun")
+            
+            if actions_22:
+                c_dist = f"0x{c_base}02"
+                rules[sat_hv]["br-int"].append(
+                    f"cookie={c_dist},table=22,priority=1,in_port={sat_port},vlan_tci=0x{s_vlan:x}/0x0fff,"
+                    f"actions={','.join(actions_22)}"
                 )
 
-        return {hv: dict(br_map) for hv, br_map in hv_bridge_rules.items()}
+            # --- REMOTE CROSS-HYPERVISOR RULES (br-tun on Sat Node) ---
+            
+            # 4. Br-Tun VXLAN Egress (Table 22)
+            # "for each remote terminal... generate br_tun_vxlan_egress"
+            # Template: Match VLAN. Action: Load TunID, Output VXLAN-Port.
+            # If multiple remote HVs, each needs a rule?
+            # But VLAN is the match. If we output to multiple HVs, we need multiple actions or flow splitting.
+            # If "match: vlan_tci", then one rule must handle ALL destinations or we need specific masks?
+            # Flow-based tunneling: we can output to multiple ports.
+            # Or does the user template imply one rule per remote HV?
+            # "for each remote terminal... generate". 
+            # If we have terminals on HV2 and HV3.
+            # Rule match: VLAN. Action: Output vxlan-hv2, output vxlan-hv3?
+            # Wait, `vxlan_tunnel_id` loading must happen before output.
+            # `load:tun->ID, output:p1, load:tun->ID, output:p2` ? Yes.
+            
+            # Collect remote HVs
+            remote_hvs = set(t['hv'] for t in remote_terms)
+            
+            egress_actions = []
+            for rhv in remote_hvs:
+                vxlan_port = f"vxlan-{rhv}"
+                egress_actions.append(f"load:0->NXM_OF_VLAN_TCI[]")
+                egress_actions.append(f"load:0x{s_tun:x}->NXM_NX_TUN_ID[]")
+                egress_actions.append(f"output:{vxlan_port}")
+                
+            if egress_actions:
+                c_egress = f"0x{c_base}04"
+                rules[sat_hv]["br-tun"].append(
+                    f"cookie={c_egress},table=22,priority=1,vlan_tci=0x{s_vlan:x}/0x0fff,"
+                    f"actions={','.join(egress_actions)}"
+                )
+                
+            # --- REMOTE SIDE RULES (On Terminal Hypervisors) ---
+            
+            # The User Template "generate_rules" block loops "for each hypervisor".
+            # And generates "br_tun_vxlan_ingress".
+                # We also need rules on Remote Br-Int to deliver to Terminal?
+                # User template `remote_downlink_to_bridge` logic applies to Local Terminals logic there?
+                # "Remote Downlink Reception"
+                # On RHV, packet arrives patch-tun with VLAN.
+                # We need a rule to strip VLAN and output to Terminal.
+                # Is that covered? 
+                # "Scenario C: Remote Sat <-> Local Term".
+                # User template's `local_downlink` matches `in_port=sat_port`.
+                # But here incoming is `patch-tun`.
+                # We need a rule: Table 4/22 match VLAN -> Output Term.
+                # Base rules handle Table 4 -> 20 -> 22.
+                # Table 22 needs a rule for this VLAN -> Output ID.
+                
+                # Find terminals on this RHV for this Sat
+                my_terms = [t for t in remote_terms if t['hv'] == rhv]
+                rhv_actions = []
+                for t in my_terms:
+                    rhv_actions.append("load:0->NXM_OF_VLAN_TCI[]")
+                    rhv_actions.append(f"output:{t['port']}")
+                
+                if rhv_actions:
+                    # Let's use c_dist (0x..02) style but for remote reception
+                    rules[rhv]["br-int"].append(
+                        f"cookie={c_dist},table=22,priority=1,vlan_tci=0x{s_vlan:x}/0x0fff,"
+                        f"actions={','.join(rhv_actions)}"
+                    )
+                    
+                # 6. Remote Uplink (Term -> Sat)
+                # Term -> Br-Int Table 0 -> Load VLAN -> Output patch-tun
+                # Matches `terminal_uplink` logic but output is patch-tun.
+                for t in my_terms:
+                    rules[rhv]["br-int"].append(
+                        f"cookie={c_up},table=0,priority=1,in_port={t['port']},vlan_tci=0,"
+                        f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),"
+                        f"load:0->NXM_OF_VLAN_TCI[],output:patch-tun"
+                    )
+
+        return dict(rules)
 
 
     def _collect_topology_links(self, topo: dict) -> List[Tuple[int, int]]:
@@ -558,15 +747,16 @@ class NetworkManager:
             for iface, data in net_state.items():
                 if data.get("type") != "broadcast": continue
                 
-                # Check IPv4
+                # Check IPv4 (Optional now, to allow rule generation before DHCP)
                 ipv4 = None
                 for addr in data.get("addresses", []):
                     if addr.get("family") == "inet":
                         ipv4 = addr.get("address")
                         break
-                if not ipv4: 
-                    logger.debug(f"No IPv4 for {name} {iface}")
-                    continue
+                
+                # if not ipv4: 
+                #    logger.debug(f"No IPv4 for {name} {iface}")
+                #    # continue  <-- relaxed
                 
                 # Check ethX
                 if not iface.startswith("eth"): continue
