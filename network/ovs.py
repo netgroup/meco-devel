@@ -153,6 +153,57 @@ def list_ports(bridge: str, target: str = None) -> list[str]:
             continue
     return []
 
+
+def add_patch_port(bridge: str, port: str, peer: str, target: str = None) -> bool:
+    """Adds a patch port connecting to a peer."""
+    # ovs-vsctl --may-exist add-port <bridge> <port> -- set Interface <port> type=patch options:peer=<peer>
+    cmd = [
+        "sudo", "ovs-vsctl", "--may-exist", "add-port", bridge, port,
+        "--", "set", "Interface", port, "type=patch", f"options:peer={peer}"
+    ]
+    
+    if target:
+        try:
+            _run_raw(_construct_cmd(cmd, target), check=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add patch port {port} on {target}: {e}")
+            return False
+            
+    # Local
+    try:
+        _run_raw(cmd, check=True)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add patch port {port} locally: {e}")
+        return False
+
+
+def add_vxlan_port(bridge: str, port: str, remote_ip: str, key: str = "flow", target: str = None) -> bool:
+    """Adds a VXLAN tunnel port."""
+    # ovs-vsctl add-port <bridge> <port> -- set interface <port> type=vxlan options:remote_ip=<ip> options:key=<key>
+    cmd = [
+        "sudo", "ovs-vsctl", "--may-exist", "add-port", bridge, port,
+        "--", "set", "interface", port, "type=vxlan", 
+        f"options:remote_ip={remote_ip}", f"options:key={key}"
+    ]
+    
+    if target:
+        try:
+            _run_raw(_construct_cmd(cmd, target), check=True)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add vxlan port {port} on {target}: {e}")
+            return False
+
+    # Local
+    try:
+        _run_raw(cmd, check=True)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to add vxlan port {port} locally: {e}")
+        return False
+
 def del_port(bridge: str, port: str, target: str = None) -> bool:
     base_cmd = ["sudo", "ovs-vsctl", "--if-exists", "del-port", bridge, port]
     
