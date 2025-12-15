@@ -65,11 +65,18 @@ class IncusClient:
         """
         Wait for multiple instances to reach a specific state.
         Optimized to avoid N API calls.
+        
+        If waiting for "Running" state, this method will actively attempt to start
+        instances found in "STOPPED" or "ERROR" state to recover from deployment flakes.
         """
-        start = time.time()
+        start_time = time.time()
         remaining = set(names)
         
-        while time.time() - start < timeout:
+        # Track last start attempt for each instance to avoid spamming start commands
+        last_attempts = {} 
+        RETRY_INTERVAL = 10 # Seconds between start retries
+        
+        while time.time() - start_time < timeout:
             if not remaining:
                 return True
                 
@@ -88,13 +95,38 @@ class IncusClient:
                 done = set()
                 for name in remaining:
                     s = current_states.get(name)
+                    if not s:
+                        continue
+
                     # Case insensitive check
-                    if s and s.lower() == state.lower():
+                    if s.lower() == state.lower():
                         done.add(name)
                         logger.info(f"Instance {name} is {state}")
-                    elif s and s.lower() == "error":
-                         logger.error(f"Instance {name} is in ERROR state")
-                
+                    elif state.lower() == "running" and s.lower() in ["stopped", "error"]:
+                        # Auto-recovery logic
+                        now = time.time()
+                        last = last_attempts.get(name, 0)
+                        
+                        if now - last > RETRY_INTERVAL:
+                            logger.warning(f"Instance {name} is in {s} state. Attempting to start/restart...")
+                            
+                            # Execute start command
+                            # We use background=True if we want async, but here we might want to block briefly
+                            # to ensure the command is sent.
+                            start_cmd = ["incus", "start", name]
+                            try:
+                                self.executor.run(start_cmd, check=True, capture_output=True)
+                                logger.info(f"Sent start command for {name}")
+                                last_attempts[name] = now
+                            except Exception as e:
+                                logger.error(f"Failed to auto-start {name}: {e}")
+                                # Don't update last_attempts so we retry sooner? Or waiting is safer?
+                                # Let's update to prevent log spam if it's persistent error
+                                last_attempts[name] = now 
+                        else:
+                            # Just waiting
+                            pass
+
                 remaining -= done
                 
             except Exception as e:
