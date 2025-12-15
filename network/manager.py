@@ -543,6 +543,18 @@ class NetworkManager:
                     f"cookie={c_dist},table=22,priority=1,in_port={sat_port},vlan_tci=0x{s_vlan:x}/0x0fff,"
                     f"actions={','.join(actions_22)}"
                 )
+            
+            # 7. Remote Terminals -> Satellite (Reception on Sat HV)
+            # Packet arrives from patch-tun with s_vlan.
+            # Base rules send it to Table 22.
+            # We need to catch it and deliver to sat_port.
+            if remote_terms:
+                 c_recv_remote = f"0x{c_base}08"
+                 rules[sat_hv]["br-int"].append(
+                     f"cookie={c_recv_remote},table=22,priority=1,in_port=patch-tun,vlan_tci=0x{s_vlan:x}/0x0fff,"
+                     f"actions=load:0->NXM_OF_VLAN_TCI[],output:{sat_port}"
+                 )
+
 
             # --- REMOTE CROSS-HYPERVISOR RULES (br-tun on Sat Node) ---
             
@@ -579,21 +591,16 @@ class NetworkManager:
                 
             # --- REMOTE SIDE RULES (On Terminal Hypervisors) ---
             
-            # The User Template "generate_rules" block loops "for each hypervisor".
-            # And generates "br_tun_vxlan_ingress".
-                # We also need rules on Remote Br-Int to deliver to Terminal?
-                # User template `remote_downlink_to_bridge` logic applies to Local Terminals logic there?
-                # "Remote Downlink Reception"
-                # On RHV, packet arrives patch-tun with VLAN.
-                # We need a rule to strip VLAN and output to Terminal.
-                # Is that covered? 
-                # "Scenario C: Remote Sat <-> Local Term".
-                # User template's `local_downlink` matches `in_port=sat_port`.
-                # But here incoming is `patch-tun`.
-                # We need a rule: Table 4/22 match VLAN -> Output Term.
-                # Base rules handle Table 4 -> 20 -> 22.
-                # Table 22 needs a rule for this VLAN -> Output ID.
-                
+            # Add Ingress Rule on Satellite Hypervisor (Return Path)
+            # If we have remote terminals, Sat HV needs to accept their TunID packets.
+            if remote_hvs:
+                c_ingress_sat = f"0x{c_base}06"
+                rules[sat_hv]["br-tun"].append(
+                    f"cookie={c_ingress_sat},table=0,priority=1,tun_id=0x{s_tun:x},"
+                    f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),output:patch-int"
+                )
+
+            for rhv in remote_hvs:
                 # Find terminals on this RHV for this Sat
                 my_terms = [t for t in remote_terms if t['hv'] == rhv]
                 rhv_actions = []
@@ -601,6 +608,25 @@ class NetworkManager:
                     rhv_actions.append("load:0->NXM_OF_VLAN_TCI[]")
                     rhv_actions.append(f"output:{t['port']}")
                 
+                # 5. Remote Br-Tun Ingress (Tunnel -> Patch) (Forward Path)
+                # RHV needs to accept Sat TunID packets.
+                c_ingress = f"0x{c_base}05"
+                rules[rhv]["br-tun"].append(
+                    f"cookie={c_ingress},table=0,priority=1,tun_id=0x{s_tun:x},"
+                    f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],output:patch-int"
+                )
+                
+                # Remote Br-Tun Egress (Patch -> Tunnel) (Return Path)
+                # RHV needs to send Sat VLAN packets back to Sat HV.
+                # Match VLAN -> Set TunID -> Output VXLAN-SatHV
+                vxlan_port_sat = f"vxlan-{sat_hv}"
+                c_egress_rhv = f"0x{c_base}07"
+                rules[rhv]["br-tun"].append(
+                    f"cookie={c_egress_rhv},table=22,priority=1,vlan_tci=0x{s_vlan:x}/0x0fff,"
+                    f"actions=load:0->NXM_OF_VLAN_TCI[],load:0x{s_tun:x}->NXM_NX_TUN_ID[],output:{vxlan_port_sat}"
+                )
+
+
                 if rhv_actions:
                     # Let's use c_dist (0x..02) style but for remote reception
                     rules[rhv]["br-int"].append(
@@ -611,11 +637,13 @@ class NetworkManager:
                 # 6. Remote Uplink (Term -> Sat)
                 # Term -> Br-Int Table 0 -> Load VLAN -> Output patch-tun
                 # Matches `terminal_uplink` logic but output is patch-tun.
+                # FIX: Do NOT strip VLAN (load:0) before outputting to patch-tun,
+                # so br-tun can see the VLAN.
                 for t in my_terms:
                     rules[rhv]["br-int"].append(
                         f"cookie={c_up},table=0,priority=1,in_port={t['port']},vlan_tci=0,"
                         f"actions=load:0x{s_vlan:x}->NXM_OF_VLAN_TCI[],resubmit(,9),"
-                        f"load:0->NXM_OF_VLAN_TCI[],output:patch-tun"
+                        f"output:patch-tun"
                     )
 
         return dict(rules)
