@@ -11,6 +11,7 @@ from infra.incus import IncusClient
 from network.manager import NetworkManager
 from network import ovs
 from emulation import generator
+from emulation.scheduler import Scheduler
 
 from utils.logger import setup_logging
 
@@ -52,7 +53,7 @@ class LifecycleManager:
         # 2. Build Instance Location Map
         # hypervisors: { 'hv1': { 'instances': ['1-Sat', ...], ... } }
         for hv_name, data in hypervisors.items():
-            for inst in data.get("instances", []):
+            for inst in data.get("instances") or []:
                 self.node_locations[inst] = hv_name
 
     def start_emulation(self, topology_data, dry_run=False):
@@ -135,6 +136,27 @@ class LifecycleManager:
 
         tasks = []
         node_map = {}  # Map instance name -> remote alias (or None for local)
+
+        # 1. Identify and Schedule Unassigned Nodes
+        unassigned_nodes = []
+        for node in nodes:
+            name = f"{node['id']}-{node['type']}"
+            if name not in self.node_locations:
+                unassigned_nodes.append(name)
+
+            logger.info(f"Scheduling {len(unassigned_nodes)} unassigned instances...")
+            # Use only remote clients if available, otherwise fallback to local
+            all_hvs = list(self.clients.keys())
+            remote_hvs = [h for h in all_hvs if h != "local"]
+
+            available_hvs = remote_hvs if remote_hvs else all_hvs
+            assignments = Scheduler.schedule(unassigned_nodes, available_hvs)
+
+            for inst, target in assignments.items():
+                # Convert "local" string back to None for internal consistency
+                final_target = None if target == "local" else target
+                self.node_locations[inst] = final_target
+                logger.info(f"  -> Assigned {inst} to {final_target or 'local'}")
 
         for node in nodes:
             name = f"{node['id']}-{node['type']}"
