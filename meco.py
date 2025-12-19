@@ -19,6 +19,7 @@ from config.loader import CONFIG
 
 # Logging Setup
 from utils.logger import setup_logging
+
 logger = setup_logging("meco.main")
 
 # Constants
@@ -26,6 +27,7 @@ PID_FILE = "/tmp/meco_server.pid"
 PID_LIST_FILE = "/tmp/meco_pids.txt"
 ACTIVITY_FLAG = "/tmp/meco_activity"
 UPLOADS_DIR = "/tmp/meco_uploads"
+
 
 def is_running(pid):
     """Checks if a process with the given PID is running."""
@@ -39,15 +41,17 @@ def is_running(pid):
         pass
     return False
 
+
 def signal_handler(sig, frame):
     """Handles termination signals."""
     logger.info("Signal received. Cleaning up...")
     try:
         if os.path.exists(PID_FILE):
-             os.remove(PID_FILE)
+            os.remove(PID_FILE)
     except Exception as e:
         logger.error(f"Error removing PID file: {e}")
     sys.exit(0)
+
 
 def server_on():
     """Starts the server in daemon mode."""
@@ -63,7 +67,8 @@ def server_on():
                 logger.info("Stale PID file found. removing.")
                 os.remove(PID_FILE)
         except Exception:
-             if os.path.exists(PID_FILE): os.remove(PID_FILE)
+            if os.path.exists(PID_FILE):
+                os.remove(PID_FILE)
 
     # 1.5 Check Hypervisor Connectivity
     hypervisors = CONFIG.get("hypervisors", {})
@@ -74,10 +79,14 @@ def server_on():
         for remote in hypervisors:
             if not client.check_remote_connection(remote):
                 unreachable.append(remote)
-        
+
         if unreachable:
-            logger.error(f"The following hypervisors are unreachable or stopped: {', '.join(unreachable)}")
-            logger.error("Please ensure all hypervisors are running and reachable before starting the server.")
+            logger.error(
+                f"The following hypervisors are unreachable or stopped: {', '.join(unreachable)}"
+            )
+            logger.error(
+                "Please ensure all hypervisors are running and reachable before starting the server."
+            )
             sys.exit(1)
         logger.info("Mentioned hypervisors are reachable.")
 
@@ -94,28 +103,28 @@ def server_on():
     logger.info("Forking to background...")
     pid = os.fork()
     if pid > 0:
-        sys.exit(0) # Exit parent
+        sys.exit(0)  # Exit parent
 
-    os.setsid() # New session
+    os.setsid()  # New session
     pid2 = os.fork()
     if pid2 > 0:
-        sys.exit(0) # Exit 2nd parent
+        sys.exit(0)  # Exit 2nd parent
 
     # 4. Write PID
     actual_pid = os.getpid()
     with open(PID_FILE, "w") as f:
         f.write(str(actual_pid) + "\n")
-    
+
     with open(PID_LIST_FILE, "a") as f:
         f.write(str(actual_pid) + "\n")
-        
+
     logger.info(f"Meco server started in background (PID: {actual_pid}).")
-    
+
     # 5. Start Server
     # Register signal handlers for clean exit of the daemon
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     try:
         serve()
     except Exception as e:
@@ -124,12 +133,15 @@ def server_on():
         if os.path.exists(PID_FILE):
             os.remove(PID_FILE)
 
+
 def server_off(force=False):
     """Stops the server and cleans up."""
     logger.info("Stopping Meco server...")
 
     if os.path.exists(ACTIVITY_FLAG) and not force:
-        logger.warning("Active emulation detected. Use 'meco off --force' to force stop.")
+        logger.warning(
+            "Active emulation detected. Use 'meco off --force' to force stop."
+        )
         return
 
     if os.path.exists(ACTIVITY_FLAG) or force:
@@ -145,9 +157,9 @@ def server_off(force=False):
 
     # Reset Infra if forced? meco.py did _teardown_bridges logic on exit?
     # meco.py's server_off calls delete_meco_instances(force=True) then kills PIDs.
-    # It also called _teardown_bridges at the very end of main() in meco.py effectively if running as script? 
+    # It also called _teardown_bridges at the very end of main() in meco.py effectively if running as script?
     # Actually serve_forever blocks. The signal handler exits.
-    
+
     # Teardown infrastructure
     try:
         nm = NetworkManager()
@@ -159,8 +171,8 @@ def server_off(force=False):
     if os.path.exists(PID_LIST_FILE):
         try:
             with open(PID_LIST_FILE, "r") as f:
-                 pids = [int(line.strip()) for line in f if line.strip()]
-            
+                pids = [int(line.strip()) for line in f if line.strip()]
+
             for pid in pids:
                 if is_running(pid):
                     logger.info(f"Killing PID {pid}")
@@ -169,16 +181,19 @@ def server_off(force=False):
                         killed = True
                     except Exception as e:
                         logger.error(f"Failed to kill {pid}: {e}")
-            
+
             # Allow time to shut down
-            if killed: time.sleep(1)
-            
+            if killed:
+                time.sleep(1)
+
             # Cleanup file
-            if os.path.exists(PID_LIST_FILE): os.remove(PID_LIST_FILE)
-            if os.path.exists(PID_FILE): os.remove(PID_FILE)
-            
+            if os.path.exists(PID_LIST_FILE):
+                os.remove(PID_LIST_FILE)
+            if os.path.exists(PID_FILE):
+                os.remove(PID_FILE)
+
             logger.info("Server stopped.")
-            
+
         except Exception as e:
             logger.error(f"Error stopping server: {e}")
     else:
@@ -198,10 +213,10 @@ def server_status():
             else:
                 logger.info("Meco server is NOT running (stale PID file).")
         except:
-             logger.info("Meco server is NOT running.")
+            logger.info("Meco server is NOT running.")
     else:
         logger.info("Meco server is NOT running.")
-        
+
     if running and os.path.exists(ACTIVITY_FLAG):
         try:
             with open(ACTIVITY_FLAG, "r") as f:
@@ -210,16 +225,17 @@ def server_status():
         except:
             pass
 
+
 def main():
     parser = argparse.ArgumentParser(description="MECO Emulator (Modular Refactor)")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Commands
     subparsers.add_parser("on", help="Start the gRPC Server (Daemon)")
-    
+
     off_parser = subparsers.add_parser("off", help="Stop the Server")
     off_parser.add_argument("--force", "-f", action="store_true", help="Force cleanup")
-    
+
     subparsers.add_parser("status", help="Show Server Status")
 
     argcomplete.autocomplete(parser)
@@ -233,6 +249,7 @@ def main():
         server_status()
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()

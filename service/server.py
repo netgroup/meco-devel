@@ -23,6 +23,7 @@ logger = setup_logging("meco.service")
 lifecycle = LifecycleManager()
 monitor = HypervisorMonitor()
 
+
 class MecoService(meco_pb2_grpc.MecoServiceServicer):
     """
     gRPC Service implementation delegating to LifecycleManager.
@@ -38,14 +39,18 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
             elif request.HasField("client_file_content"):
                 content = request.client_file_content
             else:
-                yield meco_pb2.StartResponse(success=False, message="No content provided")
+                yield meco_pb2.StartResponse(
+                    success=False, message="No content provided"
+                )
                 return
 
             # 2. Parse & Validate
             parsed_yaml = yaml.safe_load(content)
             validation = validate_topology(parsed_yaml)
             if not validation["success"]:
-                yield meco_pb2.StartResponse(success=False, message=validation["message"])
+                yield meco_pb2.StartResponse(
+                    success=False, message=validation["message"]
+                )
                 return
 
             # 3. Save as (optional)
@@ -61,12 +66,12 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
                     result = item
                     # Formulate message based on result
                     if result.get("dry_run"):
-                         msg = "Validation passed (Dry run)."
+                        msg = "Validation passed (Dry run)."
                     elif result.get("flows_inserted"):
-                         msg = "Emulation started successfully."
+                        msg = "Emulation started successfully."
                     else:
-                         msg = "Instances were deployed and reached Running state, but no flows were inserted (Port map empty)."
-                    
+                        msg = "Instances were deployed and reached Running state, but no flows were inserted (Port map empty)."
+
                     yield meco_pb2.StartResponse(success=True, message=msg)
 
         except Exception as e:
@@ -80,9 +85,13 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
                     yield meco_pb2.ShutdownResponse(success=True, log_message=item)
                 elif isinstance(item, bool):
                     success = item
-                    msg = "Emulation stopped." if success else "Shutdown failed or no active emulation."
+                    msg = (
+                        "Emulation stopped."
+                        if success
+                        else "Shutdown failed or no active emulation."
+                    )
                     yield meco_pb2.ShutdownResponse(success=success, message=msg)
-                    
+
         except Exception as e:
             logger.error(f"Shutdown RPC failed: {e}")
             yield meco_pb2.ShutdownResponse(success=False, message=str(e))
@@ -90,17 +99,18 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
     def MecoCall(self, request, context):
         return meco_pb2.MecoResponse(message=f"Echo: {request.message}")
 
+
 def serve(port=50051, max_workers=10):
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     meco_pb2_grpc.add_MecoServiceServicer_to_server(MecoService(), server)
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     logger.info(f"Meco gRPC server started on port {port}.")
-    
+
     # Start Monitor
     monitor.start()
-    
+
     server.wait_for_termination()
-    
+
     # Stop Monitor on exit
     monitor.stop()

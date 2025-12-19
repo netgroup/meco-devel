@@ -1,5 +1,6 @@
 import hashlib
 
+
 def generate_cloudinit(node):
     """
     Build a #cloud-config snippet.
@@ -8,13 +9,13 @@ def generate_cloudinit(node):
     node_id = node.get("id", "unknown")
     node_type = node.get("type", "unknown")
     node_name = f"{node_id} ({node_type})"
-    
+
     # Password handling (placeholder logic from original)
     passwd_hash = node.get(
         "passwd_hash",
-        "$6$rounds=4096$mecosalt$mecoP4ssw0rdH4sh", 
+        "$6$rounds=4096$mecosalt$mecoP4ssw0rdH4sh",
     )
-    
+
     return f"""#cloud-config
 package_update: true
 packages:
@@ -33,6 +34,7 @@ ssh_authorized_keys: []
 sudo: ALL=(ALL) NOPASSWD:ALL
 """
 
+
 def generate_forwarding_rules(neigh_map):
     """
     Generates OpenFlow rule strings for forwarding based on adjacency.
@@ -41,11 +43,13 @@ def generate_forwarding_rules(neigh_map):
     """
     rules = []
     for in_p, outs in neigh_map.items():
-        if not outs: continue
+        if not outs:
+            continue
         out_list = sorted(outs)
         actions = ",".join(f"output:{p}" for p in out_list)
         rules.append(f"priority=100,in_port={in_p},actions={actions}")
     return rules
+
 
 def generate_arp_rules(all_ports):
     """Generates ARP broadcast rules."""

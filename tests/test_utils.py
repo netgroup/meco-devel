@@ -1,6 +1,7 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from unittest.mock import patch
 import signal
@@ -36,9 +37,10 @@ class TestSignalHandler:
     @patch("sys.exit")
     def test_signal_handler_basic(self, mock_exit, caplog):
         """Test signal_handler removes PID_FILE and logs message on SIGINT."""
-        with patch("os.path.exists", return_value=True), patch(
-            "os.remove"
-        ) as mock_remove:
+        with (
+            patch("os.path.exists", return_value=True),
+            patch("os.remove") as mock_remove,
+        ):
             signal_handler(signal.SIGINT, None)
             assert "Ctrl+C" in caplog.text
             mock_remove.assert_called_with(PID_FILE)
@@ -47,9 +49,10 @@ class TestSignalHandler:
     @patch("sys.exit")
     def test_signal_handler_no_pid_file(self, mock_exit, caplog):
         """Test signal_handler when PID_FILE does not exist."""
-        with patch("os.path.exists", return_value=False), patch(
-            "os.remove"
-        ) as mock_remove:  # mock_remove still needed, even if not expected to be called in this test, for context
+        with (
+            patch("os.path.exists", return_value=False),
+            patch("os.remove") as mock_remove,
+        ):  # mock_remove still needed, even if not expected to be called in this test, for context
             signal_handler(signal.SIGINT, None)
             assert "Ctrl+C" in caplog.text
             mock_remove.assert_not_called()  # Verify os.remove is NOT called
@@ -58,9 +61,12 @@ class TestSignalHandler:
     @patch("sys.exit")
     def test_signal_handler_remove_fails(self, mock_exit, caplog):
         """Test signal_handler when removing PID_FILE fails."""
-        with patch("os.path.exists", return_value=True), patch(
-            "os.remove", side_effect=OSError("Simulated remove error")
-        ) as mock_remove:
+        with (
+            patch("os.path.exists", return_value=True),
+            patch(
+                "os.remove", side_effect=OSError("Simulated remove error")
+            ) as mock_remove,
+        ):
             signal_handler(signal.SIGINT, None)
             assert "Ctrl+C" in caplog.text
             assert "Error removing PID file" in caplog.text

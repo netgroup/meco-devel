@@ -1,9 +1,15 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from unittest.mock import patch, mock_open, MagicMock
-from meco_test_client import open_editor_for_content, perform_rpc_call, get_running_instances, delete_instance
+from meco_test_client import (
+    open_editor_for_content,
+    perform_rpc_call,
+    get_running_instances,
+    delete_instance,
+)
 import subprocess
 import json
 
@@ -12,23 +18,35 @@ class TestOpenEditorForContent:
     @patch("os.remove")
     @patch("subprocess.call")
     @patch("builtins.open", new_callable=mock_open, read_data="")
-    def test_editor_writes_nothing(self, mock_open_fn, mock_call, mock_remove, tmp_path):
-        result = open_editor_for_content(filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path))
+    def test_editor_writes_nothing(
+        self, mock_open_fn, mock_call, mock_remove, tmp_path
+    ):
+        result = open_editor_for_content(
+            filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path)
+        )
         assert result is None
 
     @patch("os.remove")
     @patch("subprocess.call")
     @patch("builtins.open", new_callable=mock_open, read_data="some: value")
-    def test_editor_writes_content_and_deletes(self, mock_open_fn, mock_call, mock_remove, tmp_path):
-        result = open_editor_for_content(filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path))
+    def test_editor_writes_content_and_deletes(
+        self, mock_open_fn, mock_call, mock_remove, tmp_path
+    ):
+        result = open_editor_for_content(
+            filename="foo.yaml", keep_file=False, cache_dir_base=str(tmp_path)
+        )
         assert result == "some: value"
         mock_remove.assert_called()
 
     @patch("os.remove")
     @patch("subprocess.call")
     @patch("builtins.open", new_callable=mock_open, read_data="some: value")
-    def test_editor_writes_content_and_keeps(self, mock_open_fn, mock_call, mock_remove, tmp_path):
-        result = open_editor_for_content(filename="foo.yaml", keep_file=True, cache_dir_base=str(tmp_path))
+    def test_editor_writes_content_and_keeps(
+        self, mock_open_fn, mock_call, mock_remove, tmp_path
+    ):
+        result = open_editor_for_content(
+            filename="foo.yaml", keep_file=True, cache_dir_base=str(tmp_path)
+        )
         assert result == "some: value"
         mock_remove.assert_not_called()
 
@@ -36,7 +54,9 @@ class TestOpenEditorForContent:
 class TestGetRunningInstances:
     @patch("subprocess.run")
     def test_valid_json_stdout(self, mock_run):
-        mock_run.return_value.stdout = json.dumps([{"name": "foo", "config": {"user.meco": "true"}}])
+        mock_run.return_value.stdout = json.dumps(
+            [{"name": "foo", "config": {"user.meco": "true"}}]
+        )
         result = get_running_instances()
         assert isinstance(result, list)
         assert result[0]["name"] == "foo"
@@ -85,7 +105,9 @@ class TestPerformRPCCall:
     @patch("meco_test_client.grpc.insecure_channel")
     @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
     @patch("meco_test_client.open_editor_for_content", return_value=None)
-    def test_start_with_empty_content_editor_none(self, mock_editor, mock_stub, mock_channel):
+    def test_start_with_empty_content_editor_none(
+        self, mock_editor, mock_stub, mock_channel
+    ):
         perform_rpc_call("start", content="")
         mock_editor.assert_called()
 
@@ -109,6 +131,7 @@ class TestPerformRPCCall:
     @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
     def test_start_grpc_unavailable(self, mock_stub, mock_channel):
         import grpc
+
         error = grpc.RpcError()
         error.code = lambda: grpc.StatusCode.UNAVAILABLE
         mock_stub.return_value.Start.side_effect = error
@@ -119,6 +142,7 @@ class TestPerformRPCCall:
     @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
     def test_start_grpc_other_error(self, mock_stub, mock_channel):
         import grpc
+
         error = grpc.RpcError()
         error.details = lambda: "error details"
         error.code = lambda: grpc.StatusCode.UNKNOWN

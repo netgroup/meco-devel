@@ -1,6 +1,7 @@
 import logging
 import sys
 
+
 class LogColors:
     RESET = "\033[0m"
     RED = "\033[31m"
@@ -8,6 +9,7 @@ class LogColors:
     YELLOW = "\033[33m"
     CYAN = "\033[36m"
     GRAY = "\033[90m"
+
 
 class ServerColorFormatter(logging.Formatter):
     def format(self, record):
@@ -23,17 +25,22 @@ class ServerColorFormatter(logging.Formatter):
         record.msg = f"{level_color}{record.msg}{LogColors.RESET}"
         return super().format(record)
 
+
 def setup_logging(name="meco", level=logging.INFO):
     """
     Sets up the logger with the unified colorful formatter.
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    
+
     # Check if handler already exists to avoid duplicates
     if not logger.handlers:
         handler = logging.StreamHandler(sys.stdout)
-        handler.setFormatter(ServerColorFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
+        handler.setFormatter(
+            ServerColorFormatter(
+                "%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"
+            )
+        )
         logger.addHandler(handler)
-        
+
     return logger

@@ -6,6 +6,7 @@ from .executors import CommandExecutor, LocalExecutor
 
 logger = logging.getLogger("meco.incus")
 
+
 class IncusClient:
     """
     A client for interacting with Incus using a pluggable executor.
@@ -33,10 +34,15 @@ class IncusClient:
             result = self.executor.run(cmd, check=False, capture_output=True)
             if result.returncode == 0:
                 return True
-            
+
             stderr = (result.stderr or "").lower()
-            if any(x in stderr for x in ["timeout", "unable to connect", "connection refused"]):
-                logger.error(f"Incus remote '{remote}' is unreachable or in stopped state")
+            if any(
+                x in stderr
+                for x in ["timeout", "unable to connect", "connection refused"]
+            ):
+                logger.error(
+                    f"Incus remote '{remote}' is unreachable or in stopped state"
+                )
                 return False
             else:
                 logger.warning(f"Unknown error connecting to '{remote}': {stderr}")
@@ -52,45 +58,48 @@ class IncusClient:
             res = self.executor.run(cmd, check=True, capture_output=True)
             if format_type == "json":
                 return json.loads(res.stdout)
-            return [] # CSV etc not strictly parsed here unless needed
+            return []  # CSV etc not strictly parsed here unless needed
         except Exception as e:
             logger.error(f"Error listing instances: {e}")
             return []
 
-    def wait_for_state(self, instance_name: str, state: str = "Running", timeout: int = 300) -> bool:
+    def wait_for_state(
+        self, instance_name: str, state: str = "Running", timeout: int = 300
+    ) -> bool:
         """Waits for an Incus instance to reach a specific state."""
         return self.wait_for_instances([instance_name], state, timeout)
 
-    def wait_for_instances(self, names: List[str], state: str, timeout: int = 300) -> bool:
+    def wait_for_instances(
+        self, names: List[str], state: str, timeout: int = 300
+    ) -> bool:
         """
         Wait for multiple instances to reach a specific state.
         Optimized to avoid N API calls.
-        
+
         If waiting for "Running" state, this method will actively attempt to start
         instances found in "STOPPED" or "ERROR" state to recover from deployment flakes.
         """
         start_time = time.time()
         remaining = set(names)
-        
+
         # Track last start attempt for each instance to avoid spamming start commands
-        last_attempts = {} 
-        RETRY_INTERVAL = 10 # Seconds between start retries
-        
+        last_attempts = {}
+        RETRY_INTERVAL = 10  # Seconds between start retries
+
         while time.time() - start_time < timeout:
             if not remaining:
                 return True
-                
+
             try:
                 # Get status of all instances in one call
                 cmd = ["incus", "list", "--format=json"]
                 result = self.executor.run(cmd, check=True, capture_output=True)
                 data = json.loads(result.stdout)
-                
+
                 current_states = {
-                    item['name']: item['state']['status'] 
-                    for item in data
+                    item["name"]: item["state"]["status"] for item in data
                 }
-                
+
                 # Check which ones are ready
                 done = set()
                 for name in remaining:
@@ -102,39 +111,46 @@ class IncusClient:
                     if s.lower() == state.lower():
                         done.add(name)
                         logger.info(f"Instance {name} is {state}")
-                    elif state.lower() == "running" and s.lower() in ["stopped", "error"]:
+                    elif state.lower() == "running" and s.lower() in [
+                        "stopped",
+                        "error",
+                    ]:
                         # Auto-recovery logic
                         now = time.time()
                         last = last_attempts.get(name, 0)
-                        
+
                         if now - last > RETRY_INTERVAL:
-                            logger.warning(f"Instance {name} is in {s} state. Attempting to start/restart...")
-                            
+                            logger.warning(
+                                f"Instance {name} is in {s} state. Attempting to start/restart..."
+                            )
+
                             # Execute start command
                             # We use background=True if we want async, but here we might want to block briefly
                             # to ensure the command is sent.
                             start_cmd = ["incus", "start", name]
                             try:
-                                self.executor.run(start_cmd, check=True, capture_output=True)
+                                self.executor.run(
+                                    start_cmd, check=True, capture_output=True
+                                )
                                 logger.info(f"Sent start command for {name}")
                                 last_attempts[name] = now
                             except Exception as e:
                                 logger.error(f"Failed to auto-start {name}: {e}")
                                 # Don't update last_attempts so we retry sooner? Or waiting is safer?
                                 # Let's update to prevent log spam if it's persistent error
-                                last_attempts[name] = now 
+                                last_attempts[name] = now
                         else:
                             # Just waiting
                             pass
 
                 remaining -= done
-                
+
             except Exception as e:
                 logger.warning(f"Error checking status: {e}")
-                
+
             if remaining:
-                time.sleep(1) # Polling interval
-        
+                time.sleep(1)  # Polling interval
+
         logger.warning(f"Timeout waiting for: {remaining}")
         return False
 
@@ -146,12 +162,16 @@ class IncusClient:
             logger.info(f"Created Incus profile: {profile_name}")
             return True
         except Exception as e:
-            if "already exists" in str(e) or (hasattr(e, "stderr") and "already exists" in e.stderr):
+            if "already exists" in str(e) or (
+                hasattr(e, "stderr") and "already exists" in e.stderr
+            ):
                 logger.debug(f"Profile {profile_name} already exists.")
                 return True
-            
-            logger.warning(f"Failed to create profile {profile_name} (might exist): {e}")
-            return False 
+
+            logger.warning(
+                f"Failed to create profile {profile_name} (might exist): {e}"
+            )
+            return False
 
     def profile_exists(self, profile_name: str) -> bool:
         """Checks if an Incus profile exists (supports remote:name)."""
@@ -160,10 +180,13 @@ class IncusClient:
         if ":" in profile_name:
             remote, name = profile_name.split(":", 1)
             remote = f"{remote}:"
-            
+
         try:
             # List profiles on the specific remote
-            res = self.executor.run(["incus", "profile", "list", remote, "--format=csv"], capture_output=True)
+            res = self.executor.run(
+                ["incus", "profile", "list", remote, "--format=csv"],
+                capture_output=True,
+            )
             profiles = res.stdout.strip().splitlines()
             # CSV format: name, ...
             existing_profiles = {p.split(",")[0] for p in profiles if p.strip()}
@@ -180,15 +203,15 @@ class IncusClient:
             logger.info(f"Deleted Incus profile: {profile_name}")
             return True
         except Exception as e:
-             err = str(e).lower()
-             if hasattr(e, "stderr") and e.stderr:
-                 err += " " + e.stderr.lower()
-                 
-             if "not found" in err:
-                 return True
-                 
-             logger.warning(f"Could not delete profile {profile_name}: {e}")
-             return False
+            err = str(e).lower()
+            if hasattr(e, "stderr") and e.stderr:
+                err += " " + e.stderr.lower()
+
+            if "not found" in err:
+                return True
+
+            logger.warning(f"Could not delete profile {profile_name}: {e}")
+            return False
 
     def copy_profile(self, source: str, dest: str) -> bool:
         cmd = ["incus", "profile", "copy", source, dest]
@@ -199,16 +222,30 @@ class IncusClient:
             logger.error(f"Failed to copy profile {source} to {dest}: {e}")
             return False
 
-    def add_profile_device(self, profile_name: str, device_name: str, device_type: str, *options: str) -> bool:
-        cmd = ["incus", "profile", "device", "add", profile_name, device_name, device_type] + list(options)
+    def add_profile_device(
+        self, profile_name: str, device_name: str, device_type: str, *options: str
+    ) -> bool:
+        cmd = [
+            "incus",
+            "profile",
+            "device",
+            "add",
+            profile_name,
+            device_name,
+            device_type,
+        ] + list(options)
         try:
             self.executor.run(cmd, check=True, capture_output=True)
             return True
         except Exception as e:
-            if "already exists" in str(e) or (hasattr(e, "stderr") and "already exists" in e.stderr):
-                 # logger.info(f"Device {device_name} already in {profile_name}.") # Optional log
-                 return True
-            logger.error(f"Failed to add device {device_name} to profile {profile_name}: {e}")
+            if "already exists" in str(e) or (
+                hasattr(e, "stderr") and "already exists" in e.stderr
+            ):
+                # logger.info(f"Device {device_name} already in {profile_name}.") # Optional log
+                return True
+            logger.error(
+                f"Failed to add device {device_name} to profile {profile_name}: {e}"
+            )
             return False
 
     def remove_profile_device(self, profile_name: str, device_name: str) -> bool:
@@ -217,23 +254,30 @@ class IncusClient:
             self.executor.run(cmd, check=True, capture_output=True)
             return True
         except Exception:
-            return False # Likely didn't exist
+            return False  # Likely didn't exist
 
-    def create_network(self, network_name: str, driver: str = "openvswitch", dns_mode: str = "dynamic") -> bool:
+    def create_network(
+        self, network_name: str, driver: str = "openvswitch", dns_mode: str = "dynamic"
+    ) -> bool:
         cmd = [
-            "incus", "network", "create", network_name,
+            "incus",
+            "network",
+            "create",
+            network_name,
             "--type=bridge",
             f"bridge.driver={driver}",
-            f"dns.mode={dns_mode}"
+            f"dns.mode={dns_mode}",
         ]
         try:
             self.executor.run(cmd, check=True, capture_output=True)
             return True
         except Exception as e:
-            if "already exists" in str(e) or (hasattr(e, "stderr") and "already exists" in e.stderr):
-                 logger.info(f"Network {network_name} already exists.")
-                 return True
-            
+            if "already exists" in str(e) or (
+                hasattr(e, "stderr") and "already exists" in e.stderr
+            ):
+                logger.info(f"Network {network_name} already exists.")
+                return True
+
             logger.error(f"Failed to create network {network_name}: {e}")
             return False
 
@@ -246,7 +290,7 @@ class IncusClient:
             err = str(e).lower()
             if hasattr(e, "stderr") and e.stderr:
                 err += " " + e.stderr.lower()
-            
+
             if "not found" in err:
                 return True
             return False
@@ -259,7 +303,7 @@ class IncusClient:
         networks: List[str] = None,
         config: Dict[str, str] = None,
         is_vm: bool = False,
-        cloud_init_file: str = None
+        cloud_init_file: str = None,
     ) -> bool:
         """
         Launches an Incus instance.
@@ -300,8 +344,18 @@ class IncusClient:
             logger.warning(f"Failed to delete {name}: {e}")
             return False
 
-    def add_instance_device(self, instance_name: str, device_name: str, device_type: str, *options: str) -> bool:
-        cmd = ["incus", "config", "device", "add", instance_name, device_name, device_type] + list(options)
+    def add_instance_device(
+        self, instance_name: str, device_name: str, device_type: str, *options: str
+    ) -> bool:
+        cmd = [
+            "incus",
+            "config",
+            "device",
+            "add",
+            instance_name,
+            device_name,
+            device_type,
+        ] + list(options)
         try:
             self.executor.run(cmd, check=True, capture_output=True)
             return True

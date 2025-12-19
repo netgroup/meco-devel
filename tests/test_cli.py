@@ -1,6 +1,7 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from meco import main, handle_command, create_parser
 from unittest.mock import patch
@@ -61,26 +62,38 @@ class TestCliCommands:
 class TestHandleCommand:
     def test_create_parser_has_subcommands(self):
         parser = create_parser()
-        subcommands = {a.dest for a in parser._subparsers._actions if hasattr(a, 'dest')}
+        subcommands = {
+            a.dest for a in parser._subparsers._actions if hasattr(a, "dest")
+        }
         assert "command" in subcommands
 
     def test_handle_command_valid(self, monkeypatch):
         called = {}
+
         def fake_on(*a, **k):
             called["on"] = True
+
         def fake_off(*a, **k):
             called["off"] = True
+
         def fake_status(*a, **k):
             called["status"] = True
+
         parser = create_parser()
         args = parser.parse_args(["on"])
-        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        handle_command(
+            args, parser, {"on": fake_on, "off": fake_off, "status": fake_status}
+        )
         assert "on" in called
         args = parser.parse_args(["off"])
-        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        handle_command(
+            args, parser, {"on": fake_on, "off": fake_off, "status": fake_status}
+        )
         assert "off" in called
         args = parser.parse_args(["status"])
-        handle_command(args, parser, {"on": fake_on, "off": fake_off, "status": fake_status})
+        handle_command(
+            args, parser, {"on": fake_on, "off": fake_off, "status": fake_status}
+        )
         assert "status" in called
 
     def test_handle_command_invalid(self, monkeypatch, capsys):

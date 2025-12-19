@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     }
 }
 
+
 def load_config(config_path=CONFIG_PATH, default_config=DEFAULT_CONFIG):
     """
     Loads configuration from a YAML file, falling back to defaults.
@@ -43,6 +44,7 @@ def load_config(config_path=CONFIG_PATH, default_config=DEFAULT_CONFIG):
         )
     return config
 
+
 def load_schema(schema_path=SCHEMA_PATH):
     """Loads the JSON schema for validation."""
     if not os.path.exists(schema_path):
@@ -54,6 +56,7 @@ def load_schema(schema_path=SCHEMA_PATH):
     except Exception as e:
         logger.error(f"Failed to load schema from {schema_path}: {e}")
         return None
+
 
 # Singleton-like access to config
 # In a real app, might want to load this explicitly at startup

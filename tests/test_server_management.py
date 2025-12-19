@@ -1,6 +1,7 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from unittest.mock import patch, Mock
 import os
@@ -18,6 +19,7 @@ from meco import (
 )
 
 servicer = MecoServiceServicer()
+
 
 @pytest.fixture(autouse=True)
 def cleanup_files():
@@ -262,8 +264,7 @@ class TestServerStatus:
             with caplog.at_level(logging.INFO, logger="meco"):
                 server_status()
         assert (
-            "Meco server is running with the following process: [1234]"
-            in caplog.text
+            "Meco server is running with the following process: [1234]" in caplog.text
         )
 
     def test_server_status_not_running(self, caplog):
@@ -315,12 +316,15 @@ class TestServerStatus:
 def test_check_incus_success(monkeypatch):
     def fake_run(*args, **kwargs):
         return None
+
     monkeypatch.setattr("subprocess.run", fake_run)
     assert servicer._check_incus() is True
+
 
 def test_check_incus_failure(monkeypatch):
     def fake_run(*args, **kwargs):
         raise FileNotFoundError
+
     monkeypatch.setattr("subprocess.run", fake_run)
     assert servicer._check_incus() is False
 
@@ -334,6 +338,7 @@ def test_start_missing_server_file(monkeypatch):
     assert not response.success
     assert "Server file not found" in response.message
 
+
 def test_start_no_input(monkeypatch):
     servicer = MecoServiceServicer()
     request = ResourceDescriptor()  # No fields set
@@ -342,21 +347,32 @@ def test_start_no_input(monkeypatch):
     assert not response.success
     assert "No valid input provided" in response.message
 
+
 def test_start_invalid_yaml(monkeypatch):
     servicer = MecoServiceServicer()
     request = ResourceDescriptor(client_file_content="bad: [unclosed")
     context = Mock()
     response = servicer.Start(request, context)
     assert not response.success
-    assert "Validation failed" in response.message or "cannot access local variable" in response.message
+    assert (
+        "Validation failed" in response.message
+        or "cannot access local variable" in response.message
+    )
+
 
 def test_start_schema_validation_failure(monkeypatch):
     servicer = MecoServiceServicer()
-    request = ResourceDescriptor(client_file_content="root: 123")  # Suppose schema expects a dict with a string value
+    request = ResourceDescriptor(
+        client_file_content="root: 123"
+    )  # Suppose schema expects a dict with a string value
     context = Mock()
     response = servicer.Start(request, context)
     assert not response.success
-    assert "Validation failed" in response.message or "cannot access local variable" in response.message
+    assert (
+        "Validation failed" in response.message
+        or "cannot access local variable" in response.message
+    )
+
 
 def test_start_dry_run(monkeypatch):
     servicer = MecoServiceServicer()
@@ -364,7 +380,11 @@ def test_start_dry_run(monkeypatch):
     context = Mock()
     response = servicer.Start(request, context)
     assert response.success or "cannot access local variable" in response.message
-    assert "dry run" in response.message or "cannot access local variable" in response.message
+    assert (
+        "dry run" in response.message
+        or "cannot access local variable" in response.message
+    )
+
 
 def test_start_incus_not_installed(monkeypatch):
     servicer = MecoServiceServicer()
@@ -372,7 +392,11 @@ def test_start_incus_not_installed(monkeypatch):
     context = Mock()
     response = servicer.Start(request, context)
     assert not response.success
-    assert "Incus not found" in response.message or "cannot access local variable" in response.message
+    assert (
+        "Incus not found" in response.message
+        or "cannot access local variable" in response.message
+    )
+
 
 def test_start_already_running(monkeypatch, tmp_path):
     servicer = MecoServiceServicer()
@@ -380,7 +404,11 @@ def test_start_already_running(monkeypatch, tmp_path):
     context = Mock()
     response = servicer.Start(request, context)
     assert not response.success
-    assert "already running" in response.message or "cannot access local variable" in response.message
+    assert (
+        "already running" in response.message
+        or "cannot access local variable" in response.message
+    )
+
 
 def test_start_success(monkeypatch, tmp_path):
     servicer = MecoServiceServicer()
@@ -389,9 +417,14 @@ def test_start_success(monkeypatch, tmp_path):
     response = servicer.Start(request, context)
     assert response.success or "cannot access local variable" in response.message
 
+
 def test_shutdown_flag_present(monkeypatch, tmp_path):
-    class DummyRequest: pass
-    class DummyContext: pass
+    class DummyRequest:
+        pass
+
+    class DummyContext:
+        pass
+
     flag = tmp_path / "activity.flag"
     flag.write_text("running")
     monkeypatch.setattr("meco.ACTIVITY_FLAG", str(flag))
@@ -399,9 +432,12 @@ def test_shutdown_flag_present(monkeypatch, tmp_path):
     assert response.success
     assert not flag.exists()
 
+
 def test_shutdown_flag_missing(monkeypatch, tmp_path):
     servicer = MecoServiceServicer()
     context = Mock()
     response = servicer.Shutdown(None, context)
     assert not response.success
-    assert "No active emulation." in response.message or "not running" in response.message
+    assert (
+        "No active emulation." in response.message or "not running" in response.message
+    )

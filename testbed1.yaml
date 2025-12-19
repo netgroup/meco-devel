@@ -78,8 +78,3 @@ visibility-ground:
         delay: 30
         loss: 0
         bandwidth: 40
-      - source: 1
-        destination: 5
-        delay: 30
-        loss: 0
-        bandwidth: 40

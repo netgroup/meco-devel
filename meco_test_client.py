@@ -22,6 +22,7 @@ class LogColors:
     CYAN = "\033[36m"
     GRAY = "\033[90m"
 
+
 class ClientColorFormatter(logging.Formatter):
     def format(self, record):
         level_color = {
@@ -35,6 +36,7 @@ class ClientColorFormatter(logging.Formatter):
         record.levelname = f"[Client-{record.levelname}]"
         record.msg = f"{level_color}{record.msg}{LogColors.RESET}"
         return super().format(record)
+
 
 handler = logging.StreamHandler()
 handler.setFormatter(ClientColorFormatter("%(levelname)s %(message)s"))
@@ -87,8 +89,7 @@ def get_running_instances():
         )
         all = json.loads(result.stdout)
         return [
-            inst for inst in all 
-            if inst.get("config", {}).get("user.meco") == "true"
+            inst for inst in all if inst.get("config", {}).get("user.meco") == "true"
         ]
     except subprocess.CalledProcessError as e:
         logger.error(f"Error listing instances: {e}")
@@ -106,7 +107,7 @@ def delete_instance(name):
             ["incus", "delete", name, "--force"],
             check=True,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
         )
         return True
     except subprocess.CalledProcessError as e:
@@ -114,7 +115,9 @@ def delete_instance(name):
         return False
 
 
-def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun=False, content=None):
+def perform_rpc_call(
+    command, filename=None, localfile=None, saveas=None, dryrun=False, content=None
+):
     """Tests the Meco gRPC service with file reference or inline content."""
     try:
         channel = grpc.insecure_channel("localhost:50051")
@@ -153,36 +156,42 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
                 for response in stub.Start(request):
                     if response.log_message:
                         logger.info(response.log_message)
-                        
+
                     if response.message:
                         msg = response.message.lower()
                         if "incus not found" in msg or "install incus" in msg:
-                            logger.error("Deployment failed: Incus is not installed on the server. Please install Incus (e.g. `sudo apt install incus`) and try again.")
+                            logger.error(
+                                "Deployment failed: Incus is not installed on the server. Please install Incus (e.g. `sudo apt install incus`) and try again."
+                            )
                         elif "running" in msg:
                             # e.g. “Emulation based on X is running…”
                             logger.warning(response.message)
                         elif "instances were deployed" in msg and "no flows" in msg:
-                            logger.warning(response.message)  # Show as warning but not error, as instances are running
+                            logger.warning(
+                                response.message
+                            )  # Show as warning but not error, as instances are running
                         elif "processing successful" in msg:
                             if "dry run" in msg:
                                 logger.info("Dry run passed: YAML is valid.")
                             else:
                                 logger.info("Deployment started successfully on Incus.")
                         elif "emulation started successfully" in msg:
-                             logger.info("Deployment started successfully on Incus.")
+                            logger.info("Deployment started successfully on Incus.")
                         else:
                             # Any other error message from the server
-                           if not response.success:
+                            if not response.success:
                                 logger.error(f"Deployment failed: {response.message}")
-                           else:
+                            else:
                                 logger.info(response.message)
             except grpc.RpcError as e:
                 if e.code() == grpc.StatusCode.UNAVAILABLE:
-                    logger.error("Meco server is not running. Start it with 'meco on' first.")
+                    logger.error(
+                        "Meco server is not running. Start it with 'meco on' first."
+                    )
                 else:
                     logger.error(f"gRPC Error: {e.details()}")
                 sys.exit(1)
-                
+
         elif command == "shutdown":
             try:
                 server_shutdown_successful = False
@@ -192,10 +201,10 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
                     if response.message:
                         if response.success:
                             logger.info(response.message)
-                            server_shutdown_successful = True # At least one success message indicates server started shutdown
+                            server_shutdown_successful = True  # At least one success message indicates server started shutdown
                         else:
                             logger.error(f"Shutdown failed: {response.message}")
-                
+
                 # Only attempt local instance cleanup if the server indicated a successful shutdown process
                 if server_shutdown_successful:
                     try:
@@ -205,7 +214,9 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
                     except Exception as e:
                         logger.error(f"Error during instance cleanup: {e}")
                 else:
-                    logger.warning("Server shutdown did not complete successfully, skipping local instance cleanup.")
+                    logger.warning(
+                        "Server shutdown did not complete successfully, skipping local instance cleanup."
+                    )
 
             except grpc.RpcError as e:
                 logger.error(f"gRPC Error during shutdown: {e.details()}")
@@ -225,19 +236,33 @@ def perform_rpc_call(command, filename=None, localfile=None, saveas=None, dryrun
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Meco YAML Client")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    
+
     # START command
-    start_parser = subparsers.add_parser("start", help="Start processing the input topology and deploy it")
+    start_parser = subparsers.add_parser(
+        "start", help="Start processing the input topology and deploy it"
+    )
     group = start_parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--filename", help="Server-side file path (existing on server)")
-    group.add_argument("--filepath", dest="localfile", help="Read local file and send as content")
-    group.add_argument("--content", nargs="?", const="", help="Provide file content directly as a string or open an editor if empty")
-    start_parser.add_argument("--saveas", help="Specify remote filename to save the file as")
-    start_parser.add_argument("--dryrun", action="store_true", help="Validate without execution")
+    group.add_argument(
+        "--filepath", dest="localfile", help="Read local file and send as content"
+    )
+    group.add_argument(
+        "--content",
+        nargs="?",
+        const="",
+        help="Provide file content directly as a string or open an editor if empty",
+    )
+    start_parser.add_argument(
+        "--saveas", help="Specify remote filename to save the file as"
+    )
+    start_parser.add_argument(
+        "--dryrun", action="store_true", help="Validate without execution"
+    )
 
     # SHUTDOWN command
-    shutdown_parser = subparsers.add_parser("shutdown", help="Shut down running deployment")
-
+    shutdown_parser = subparsers.add_parser(
+        "shutdown", help="Shut down running deployment"
+    )
 
     args = parser.parse_args()
     if args.command == "shutdown":

@@ -4,6 +4,7 @@ from .loader import load_schema
 
 logger = logging.getLogger("meco.validator")
 
+
 def validate_topology(parsed_yaml):
     """
     Validates the parsed YAML topology against the schema.

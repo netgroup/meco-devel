@@ -7,10 +7,12 @@ from config.loader import CONFIG
 
 logger = logging.getLogger("meco.monitor")
 
+
 class HypervisorMonitor:
     """
     Monitors the connectivity status of configured hypervisors in a background thread.
     """
+
     def __init__(self, interval: int = 5):
         self.interval = interval
         self.running = False
@@ -23,7 +25,7 @@ class HypervisorMonitor:
         """Starts the monitoring thread."""
         if self.running:
             return
-        
+
         self.running = True
         self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.thread.start()
@@ -45,20 +47,20 @@ class HypervisorMonitor:
 
         while self.running:
             for remote in hypervisors:
-                if not self.running: 
+                if not self.running:
                     break
-                
+
                 reachable = self.client.check_remote_connection(remote)
-                
+
                 with self._lock:
                     previous_status = self.status.get(remote)
                     self.status[remote] = reachable
-                
+
                 if not reachable:
                     logger.critical(f"Hypervisor '{remote}' is unreachable or stopped!")
                 elif previous_status is False and reachable:
-                     logger.info(f"Hypervisor '{remote}' is back online.")
-            
+                    logger.info(f"Hypervisor '{remote}' is back online.")
+
             # Sleep in increments to allow faster shutdown
             sleep_step = 0.5
             if self.interval < sleep_step:
