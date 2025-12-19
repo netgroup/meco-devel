@@ -136,7 +136,7 @@ class NetworkManager:
                     if remote:
                         cmd = ["incus", "exec", remote, "--"] + cmd
                     executor.run(cmd, check=False)
-                except:
+                except Exception:
                     pass
 
             # Delete Incus network (use qualified name)
@@ -325,7 +325,7 @@ class NetworkManager:
             try:
                 nid = int(n.get("id"))
                 node_type[nid] = str(n.get("type", "")).lower()
-            except:
+            except Exception:
                 continue
 
         # Collect links
@@ -459,7 +459,7 @@ class NetworkManager:
         for n in topo.get("nodes", []):
             try:
                 node_type[int(n.get("id"))] = str(n.get("type", "")).lower()
-            except:
+            except Exception:
                 continue
 
         links = self._collect_topology_links(topo)

@@ -212,7 +212,7 @@ def server_status():
                 running = True
             else:
                 logger.info("Meco server is NOT running (stale PID file).")
-        except:
+        except (OSError, ValueError):
             logger.info("Meco server is NOT running.")
     else:
         logger.info("Meco server is NOT running.")
@@ -222,7 +222,7 @@ def server_status():
             with open(ACTIVITY_FLAG, "r") as f:
                 content = f.read().strip()
             logger.info(f"Active Emulation: {content}")
-        except:
+        except (OSError, ValueError):
             pass
 
 

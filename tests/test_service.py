@@ -272,9 +272,6 @@ class TestStartCommand:
             )
 
 
-from unittest.mock import patch
-
-
 class TestStatusMessages:
     @patch("service.server.lifecycle")
     @patch("service.server.validate_topology")
