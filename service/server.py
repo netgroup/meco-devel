@@ -1,7 +1,6 @@
-import logging
 import grpc
-import os
 import yaml
+import time
 from concurrent import futures
 
 try:
@@ -31,6 +30,7 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
 
     def Start(self, request, context):
         try:
+            start_time = time.time()
             # 1. Resolve content
             content = None
             if request.HasField("server_file_path"):
@@ -74,8 +74,16 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
 
                     yield meco_pb2.StartResponse(success=True, message=msg)
 
+                    # Log final result and duration
+                    duration = time.time() - start_time
+                    status = "Success" if result.get("success") else "Failed"
+                    logger.info(
+                        f"Emulation {status}. Duration: {duration:.2f}s. Result: {msg}"
+                    )
+
         except Exception as e:
-            logger.error(f"Start RPC failed: {e}")
+            duration = time.time() - start_time
+            logger.error(f"Start RPC failed after {duration:.2f}s: {e}")
             yield meco_pb2.StartResponse(success=False, message=str(e))
 
     def Shutdown(self, request, context):

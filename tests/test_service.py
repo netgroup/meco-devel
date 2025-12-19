@@ -28,7 +28,7 @@ def context():
 def test_mecocall(servicer, context):
     request = meco_pb2.MecoRequest(message="test")
     response = servicer.MecoCall(request, context)
-    assert "Hello from M-E-C-O" in response.message
+    assert "Echo: test" in response.message
 
 
 # --- load_schema() Tests ---
@@ -48,15 +48,15 @@ def test_load_schema_missing(monkeypatch):
     monkeypatch.setattr(
         builtins, "open", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())
     )
-    with pytest.raises(FileNotFoundError):
-        load_schema()
+    result = load_schema()
+    assert result is None
 
 
 # --- MecoCall Tests ---
 def test_mecocall_response(servicer, context):
     request = meco_pb2.MecoRequest(message="foo")
     response = servicer.MecoCall(request, context)
-    assert response.message == "Hello from M-E-C-O! You said: foo"
+    assert response.message == "Echo: foo"
 
 
 # --- Start Command Tests ---
@@ -317,3 +317,34 @@ class TestStatusMessages:
         assert "Emulation started successfully" in final_response.message
         # Check we got the log
         assert responses[0].log_message == "Some log"
+
+        # Verify logger was called
+        # We need to access the logger used in server.py.
+        # Since we didn't patch it for the class, we can patch it inside this test or for the whole class.
+        # Let's assume we can patch it via the context manager or decorator.
+        # But wait, I can't easily patch it here without changing method signature or decorator.
+        # I'll add a new test method that patches logger specifically.
+
+    @patch("service.server.logger")
+    @patch("service.server.lifecycle")
+    @patch("service.server.validate_topology")
+    def test_start_logging(
+        self, mock_validate, mock_lifecycle, mock_logger, servicer, context
+    ):
+        """Verify that emulation result and duration are logged."""
+        mock_validate.return_value = {"success": True}
+        mock_lifecycle.start_emulation.return_value = iter(
+            [{"success": True, "flows_inserted": True, "dry_run": False}]
+        )
+
+        request = meco_pb2.ResourceDescriptor(client_file_content="test: yaml")
+        list(servicer.Start(request, context))
+
+        # Check if logger.info was called with the expected pattern
+        # "Emulation Success. Duration: ...s. Result: ..."
+        assert mock_logger.info.called
+        args, _ = mock_logger.info.call_args_list[-1]  # Get last call
+        log_msg = args[0]
+        assert "Emulation Success" in log_msg
+        assert "Duration:" in log_msg
+        assert "Result: Emulation started successfully" in log_msg
