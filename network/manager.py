@@ -211,7 +211,7 @@ class NetworkManager:
 
             # Add port to br-tun
             # Use key=flow (default in ovs helper is flow) or fixed key?
-            # User design doc says: "TUN_ID: VXLAN Tunnel ID (VNI) for remote connections (e.g., 0x17)"
+            # design doc says: "TUN_ID: VXLAN Tunnel ID (VNI) for remote connections (e.g., 0x17)"
             # This implies flow-based tunneling (options:key=flow) where we set tunnel_id in flow actions.
             ovs.add_vxlan_port(
                 self.bridge_tunnel, port_name, peer_ip, key="flow", target=current_hv

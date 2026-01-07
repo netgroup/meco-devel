@@ -54,7 +54,6 @@ class LocalExecutor(CommandExecutor):
         text: bool = True,
         background: bool = False,
     ) -> subprocess.CompletedProcess:
-        # LocalExecutor ignores background flag for now, as local incus launch is synchronous and fine.
         return subprocess.run(
             cmd, check=check, capture_output=capture_output, text=text
         )

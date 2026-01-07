@@ -2,19 +2,30 @@ import grpc
 import yaml
 import time
 from concurrent import futures
+from utils.logger import setup_logging, LogColors
 
 try:
     import meco_pb2
     import meco_pb2_grpc
 except ImportError:
-    # Handle case where protos are not yet in path or need recompilation
-    # For refactor context, we assume they are available or we mock imports if strictly needed for linting
-    pass
+    import sys
+
+    logger = setup_logging("meco.service")
+    logger.error("Missing compiled protobuf definitions.")
+    print(
+        f"\n{LogColors.CYAN}Please run the following command to recompile:{LogColors.RESET}\n",
+        file=sys.stderr,
+    )
+    print(
+        f"  {LogColors.BRIGHT_YELLOW}python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto{LogColors.RESET}\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 from emulation.lifecycle import LifecycleManager
 from config.validator import validate_topology
 
-from utils.logger import setup_logging
+
 from service.monitor import HypervisorMonitor
 
 logger = setup_logging("meco.service")

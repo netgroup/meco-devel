@@ -9,6 +9,7 @@ class LogColors:
     YELLOW = "\033[33m"
     CYAN = "\033[36m"
     GRAY = "\033[90m"
+    BRIGHT_YELLOW = "\033[93m"
 
 
 class ServerColorFormatter(logging.Formatter):
