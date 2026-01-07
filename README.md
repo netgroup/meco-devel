@@ -42,8 +42,9 @@ This mapping is hard-coded for user convenience.
 4. [Configuration Guide](#configuration-guide)
 5. [Command Reference](#command-reference)
 6. [Troubleshooting](#troubleshooting)
-7. [Contributing](#contributing)
-8. [License](#license)
+7. [Project Structure](#project-structure)
+8. [Contributing](#contributing)
+9. [License](#license)
 
 ---
 
@@ -58,7 +59,7 @@ Here's the updated **Installation** section of your `README.md`, rewritten to fu
 | Requirement | Version                       |
 | ----------- | ----------------------------- |
 | Python      | 3.8+                          |
-| Incus       | See below                     |
+| Incus       | 6.16+                     |
 | OS          | Ubuntu 22.04+, ideally 24.04+ |
 
 ---
@@ -208,22 +209,45 @@ tail -f /tmp/meco_client.log  # Client logs (colored output)
 A minimal configuration with a `NetworkOrchestrator` node:
 
 ```yaml
+```yaml
+topology:
+  orbital-plane: 1
+  sat-orbital-plane: 1
+
+node-types:
+  - type: Satellite
+    interfaces:
+      - connects-to: Terminal
+    properties:
+      image: "satellite.img"
+  - type: Terminal
+    interfaces:
+      - connects-to: Satellite
+    properties:
+      image: "terminal.img"
+
 nodes:
-  - name: NetworkOrchestrator
-    type: orchestrator
-    image: ubuntu:22.04
-    resources:
-      cpu: 2
-      memory: 2GB
-  - name: Satellite1
-    type: satellite
-    image: ubuntu:22.04
-  - name: Terminal
-    type: terminal
-    image: ubuntu:22.04
-links:
-  - endpoints: [NetworkOrchestrator, Satellite1]
-  - endpoints: [Satellite1, Terminal]
+  - id: 0
+    type: Satellite
+    latitude: 0.0
+    longitude: 0.0
+    altitude: 550000
+    orbital-plane: 0
+  - id: 1
+    type: Terminal
+    latitude: 0.0
+    longitude: 0.0
+    altitude: 0
+    orbital-plane: 0
+
+visibility-ground:
+  - time: 0
+    connection:
+      - source: 1
+        destination: 0
+        delay: 20
+        loss: 0
+        bandwidth: 50
 ```
 
 ---
@@ -255,6 +279,37 @@ MECO uses YAML files to define network topologies and simulation parameters. You
 
 > **Tip:** Example YAML profiles are available in the `profiles/` directory.
 
+### Server Configuration (`config/config.yaml`)
+
+The `config/config.yaml` file controls global settings and distributed deployment mapping.
+
+```yaml
+defaults:
+  # Infrastructure settings
+  integration_bridge: "br-int"
+  tunnel_bridge: "br-tun"
+  storage_pool: "default"
+  
+  # Default images
+  image_container: "images:ubuntu/22.04"
+  image_vm: "images:ubuntu/noble"
+
+hypervisors:
+  hv1:
+    instances:
+      - "1-Satellite"  # Explicitly pin this instance to hv1
+    ip: "10.55.0.186"
+  hv2:
+    instances: []      # Available for dynamic scheduling
+    ip: "10.55.0.225"
+```
+
+**Key Sections:**
+- **`defaults`**: Defines base resources like Incus profiles, bridges, and default OS images.
+- **`hypervisors`**: maps remote machines for distributed emulation.
+  - **`instances`**: List of specific node IDs (e.g. `0-Satellite`) to force-deploy on this node. If empty or omitted, the scheduler may assign any unpinned node here.
+  - **`ip`**: SSH address of the remote worker.
+
 ---
 
 ## Command Reference <a id="command-reference"></a>
@@ -274,12 +329,32 @@ MECO uses YAML files to define network topologies and simulation parameters. You
 
 | Command/Flag    | Description                                      | Example                                          |
 | -------------- | ------------------------------------------------ | ------------------------------------------------ |
+| `start`        | Start processing topology and deploy             | `client start ...`                               |
+| `shutdown`     | Gracefully stop active emulation & delete instances | `client shutdown`                             |
+
+#### Start Options
+| Flag           | Description                                      | Example                                          |
+| -------------- | ------------------------------------------------ | ------------------------------------------------ |
 | `--filepath`   | Upload local YAML                                | `client start --filepath config.yaml`            |
 | `--filename`   | Use server-side file                             | `client start --filename saved_config.yaml`      |
 | `--content`    | Direct YAML input                                | `client start --content`                         |
 | `--saveas`     | Save configuration                               | `client start --filepath cfg.yaml --saveas prod` |
 | `--dryrun`     | Validate only (full JSON-Schema validation)      | `client start --filepath cfg.yaml --dryrun`      |
-| `shutdown`     | Gracefully stop active emulation & delete instances | `client shutdown`                             |
+
+---
+
+## Project Structure <a id="project-structure"></a>
+
+MECO is modularized into several key components:
+
+- **`meco/`**: Core server logic, daemon management, and entry points.
+- **`client/`**: Client-side CLI tools and gRPC interaction.
+- **`emulation/`**: Core emulation logic, lifecycle management (start/stop), and cloud-init generation.
+- **`network/`**: Network management, OpenFlow rule generation, and bridge configuration.
+- **`service/`**: gRPC server implementation and protocol buffer definitions.
+- **`infra/`**: Infrastructure abstractions (Incus client, Executors for local/SSH).
+- **`config/`**: Configuration loaders and schema validation.
+
 
 ---
 
@@ -344,7 +419,7 @@ incus list --format=json | jq -r '.[] | select(.config["user.meco"]=="true").nam
 
 ### Known Limitations
 
-- Instances deploy sequentially for now, soon to be updated to parallel deployment.
+- **Sequential Teardown**: While deployment is parallelized, teardown currently processes hypervisors sequentially (though fast).
 
 ---
 

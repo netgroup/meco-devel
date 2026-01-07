@@ -7,6 +7,8 @@ A comprehensive guide for contributing to and extending the MECO emulator system
 ## Table of Contents
 
 - [API Architecture](#architecture)
+- [Codebase Organization](#codebase-organization)
+- [Infrastructure Abstraction](#infra-abstraction)
 - [Development Environment Setup](#dev-setup)
 - [Development Workflow](#development-workflow)
 - [Protobuf & gRPC](#protobuf-grpc)
@@ -92,6 +94,58 @@ message StartResponse {
   - TLS support (future)
 - **Instance Cleanup Logic**:
   - The client automatically deletes both containers and VMs associated with MECO deployments (not just containers)
+
+---
+
+## Codebase Organization <a id="codebase-organization"></a>
+
+The project is structured into modular components to separate concerns and improve maintainability:
+
+| Package | Purpose |
+| :--- | :--- |
+| **`meco/`** | **Entry Point**. Contains `meco.py`, daemon logic, signal handling, and CLI argument parsing (server-side). |
+| **`client/`** | **Client Wrapper**. Shell scripts and python logic for client CLI operation (`meco_test_client.py`). |
+| **`emulation/`** | **Core Logic**. Handles the lifecycle of emulations (`lifecycle.py`), node scheduling, and cloud-init generation (`generator.py`). |
+| **`network/`** | **Network Layer**. Manages OVS bridges, flow rules (`manager.py`), and localized network setup on hypervisors. |
+| **`service/`** | **RPC Interface**. Implements the gRPC server (`server.py`) and holds the compiled protobuf stubs. |
+| **`infra/`** | **Hardware Abstraction**. Provides `IncusClient` and executors (`local`, `ssh`) to interact with hypervisors transparently. |
+| **`config/`** | **Configuration**. Handles YAML loading, schema validation (`loader.py`), and default settings. |
+| **`utils/`** | **Utilities**. Logging setup, helper functions, and shared tools. |
+
+---
+
+## Infrastructure Abstraction <a id="infra-abstraction"></a>
+
+MECO runs on a distributed set of hypervisors but manages them as a unified resource. This is achieved through the **Infrastructure Abstraction Layer** located in `infra/`.
+
+### The Executor Pattern
+
+The system uses the **Strategy Pattern** to decouple *what* command to run from *where* to run it.
+
+- **`CommandExecutor` (ABC)**: Defines the interface for running commands and uploading files.
+- **`LocalExecutor`**: Uses python's `subprocess` to run commands on the local machine.
+- **`SshExecutor`**: Wraps commands to execute on a remote host via SSH.
+
+#### SSH Optimization
+The `SshExecutor` is highly optimized for performance and reliability:
+- **Multiplexing**: Uses `ControlMaster` and `ControlPersist` to reuse a single SSH connection for multiple commands, eliminating handshake overhead.
+- **Non-blocking**: Supports background execution (`-f`) for fire-and-forget tasks like launching instances.
+- **Batch Mode**: Disables interactive prompts to prevent hanging on automation.
+
+### Incus Client Wrapper
+
+The `IncusClient` is a high-level wrapper around the `incus` CLI. It requires an `executor` at initialization:
+
+```python
+# Initializing for local use
+local_client = IncusClient(executor=LocalExecutor())
+
+# Initializing for remote use
+ssh_executor = SshExecutor(host="10.0.0.5", user="ubuntu")
+remote_client = IncusClient(executor=ssh_executor)
+```
+
+Methods in `IncusClient` (e.g., `launch_instance`, `create_network`) simply build the appropriate `incus` command lists and pass them to `self.executor.run()`. This ensures that the core logic in `LifecycleManager` remains identical whether deploying to `localhost` or a remote cluster.
 
 ---
 
