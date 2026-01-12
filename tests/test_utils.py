@@ -67,7 +67,7 @@ class TestSignalHandler:
             ) as mock_remove,
         ):
             signal_handler(signal.SIGINT, None)
-            assert "Ctrl+C" in caplog.text
+            assert "Signal received" in caplog.text
             assert "Error removing PID file" in caplog.text
             mock_remove.assert_called_with(
                 PID_FILE

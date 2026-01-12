@@ -41,7 +41,7 @@ def sample_topology():
 
 
 class TestNetworkManagerOF13:
-    @patch("network.manager.NetworkManager.build_port_map")
+    @patch("meco.network.manager.NetworkManager.build_port_map")
     def test_generate_visibility_rules(
         self, mock_build_map, net_manager, mock_port_map, sample_topology
     ):
@@ -60,31 +60,41 @@ class TestNetworkManagerOF13:
         # 1. Check Baseline rules (ARP, tables 22, 20, 5, 9)
         # ARP for 1, 2, 3
         # Satellite 1 (port 1) -> outputs 2, 3
-        arp_sat = next((f for f in flow_list if "in_port=1,arp" in f), None)
-        assert arp_sat
-        assert "output:2" in arp_sat and "output:3" in arp_sat
-
-        # Learn rule
-        assert any("table=9" in f and "learn(" in f for f in flow_list)
-
-        # 2. Check Satellite Flows (Table 0 -> 20)
-        # Port 1 (Sat)
-        sat_ingress = next(
-            (f for f in flow_list if "in_port=1" in f and "cookie=0x102" in f), None
+        # 1. Check Table 0 Downlink (Sat -> Table 5)
+        # Satellite 1 (port 1) -> Table 0 -> resubmit(5)
+        # Assuming regex "in_port=1.*resubmit\(,5\)"
+        sat_down = next(
+            (
+                f
+                for f in flow_list
+                if "in_port=1" in f and "table=0" in f and "resubmit(,5)" in f
+            ),
+            None,
         )
-        assert sat_ingress
-        assert "load:0xa->NXM_OF_VLAN_TCI[]" in sat_ingress  # VLAN 10
+        assert sat_down
 
-        # Downlink (Table 5 -> output terminals)
-        downlink = next(
-            (f for f in flow_list if "table=5" in f and "cookie=0x103" in f), None
+        # 2. Check Table 22 Distribution (Sat -> Terminals)
+        # Matches in_port=1 -> output:2, output:3 (and patch-tun for remote)
+        sat_dist = next(
+            (f for f in flow_list if "in_port=1" in f and "table=22" in f), None
         )
-        assert downlink
-        assert "output:2" in downlink
-        assert "output:3" in downlink
+        assert sat_dist
+        assert "output:2" in sat_dist
+        assert "output:3" in sat_dist
+        assert "output:patch-tun" in sat_dist
 
-        # 3. Check Terminal Flows (Uplink: Term -> Sat)
-        # Term 2
+        # 3. Check Terminal Uplink (Term -> Sat)
+        # Terminal 2 (port 2) -> Table 0 -> ... output:1
+        term_up = next(
+            (
+                f
+                for f in flow_list
+                if "in_port=2" in f and "table=0" in f and "output:1" in f
+            ),
+            None,
+        )
+        assert term_up
+
         term2_up = next(
             (
                 f
@@ -103,7 +113,7 @@ class TestNetworkManagerOF13:
         )
         assert term3_up
 
-    @patch("network.manager.NetworkManager.build_port_map")
+    @patch("meco.network.manager.NetworkManager.build_port_map")
     def test_generate_visibility_rules_no_links(
         self, mock_build_map, net_manager, mock_port_map
     ):
@@ -113,7 +123,7 @@ class TestNetworkManagerOF13:
         rules = net_manager.generate_visibility_rules(topo)
         assert rules == {}  # No links
 
-    @patch("network.manager.NetworkManager.build_port_map")
+    @patch("meco.network.manager.NetworkManager.build_port_map")
     def test_generate_visibility_rules_cross_domain(
         self, mock_build_map, net_manager, mock_port_map, sample_topology
     ):

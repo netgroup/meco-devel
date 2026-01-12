@@ -9,7 +9,7 @@ def net_manager():
     return NetworkManager()
 
 
-@patch("network.manager.NetworkManager._scan_ports")
+@patch("meco.network.manager.NetworkManager._scan_ports")
 def test_build_port_map_immediate_success(mock_scan, net_manager):
     """Test that it returns immediately if expected count is met."""
     expected = {"1:0": ("hv1", "br-int", 1), "2:0": ("hv1", "br-int", 2)}
@@ -24,7 +24,7 @@ def test_build_port_map_immediate_success(mock_scan, net_manager):
     assert elapsed < 2  # Should be fast
 
 
-@patch("network.manager.NetworkManager._scan_ports")
+@patch("meco.network.manager.NetworkManager._scan_ports")
 def test_build_port_map_retry_success(mock_scan, net_manager):
     """Test that it retries until expected count is met."""
     # First call: empty, Second: 1 node, Third: 2 nodes (success)
@@ -41,7 +41,7 @@ def test_build_port_map_retry_success(mock_scan, net_manager):
     assert mock_scan.call_count == 3
 
 
-@patch("network.manager.NetworkManager._scan_ports")
+@patch("meco.network.manager.NetworkManager._scan_ports")
 def test_build_port_map_timeout(mock_scan, net_manager):
     """Test that it returns what it has after timeout."""
     mock_scan.return_value = {"1:0": ("hv1", "br-int", 1)}

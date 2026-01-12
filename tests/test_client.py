@@ -116,7 +116,10 @@ class TestPerformRPCCall:
     @patch("meco.client.get_running_instances", return_value=[{"name": "foo"}])
     @patch("meco.client.delete_instance")
     def test_shutdown_success(self, mock_delete, mock_get, mock_stub, mock_channel):
-        mock_stub.return_value.Shutdown.return_value.success = True
+        # Shutdown returns a stream (generator)
+        response = MagicMock()
+        response.success = True
+        mock_stub.return_value.Shutdown.return_value = [response]
         perform_rpc_call("shutdown")
         mock_delete.assert_called_with("foo")
 

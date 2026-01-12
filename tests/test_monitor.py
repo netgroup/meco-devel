@@ -9,12 +9,12 @@ class TestHypervisorMonitor(unittest.TestCase):
     def setUp(self):
         # Mock configs
         self.config_patcher = patch(
-            "service.monitor.CONFIG", {"hypervisors": ["remote1"]}
+            "meco.service.monitor.CONFIG", {"hypervisors": ["remote1"]}
         )
         self.config_mock = self.config_patcher.start()
 
         # Mock IncusClient
-        self.incus_patcher = patch("service.monitor.IncusClient")
+        self.incus_patcher = patch("meco.service.monitor.IncusClient")
         self.incus_cls_mock = self.incus_patcher.start()
         self.incus_mock = MagicMock()
         self.incus_cls_mock.return_value = self.incus_mock
