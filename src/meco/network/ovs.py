@@ -1,7 +1,7 @@
 import logging
 import subprocess
-from config.loader import CONFIG
-from infra.executors import LocalExecutor
+from meco.config.loader import CONFIG
+from meco.infra.executors import LocalExecutor
 
 logger = logging.getLogger("meco.ovs")
 

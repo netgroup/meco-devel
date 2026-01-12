@@ -11,14 +11,14 @@ import argcomplete
 # Ensure package is in path content
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from service.server import serve
-from emulation.lifecycle import LifecycleManager
-from network.manager import NetworkManager
-from infra.incus import IncusClient
-from config.loader import CONFIG
+from meco.service.server import serve
+from meco.emulation.lifecycle import LifecycleManager
+from meco.network.manager import NetworkManager
+from meco.infra.incus import IncusClient
+from meco.config.loader import CONFIG
 
 # Logging Setup
-from utils.logger import setup_logging
+from meco.utils.logger import setup_logging
 
 logger = setup_logging("meco.main")
 

@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from network.manager import NetworkManager
+from meco.network.manager import NetworkManager
 import time
 
 

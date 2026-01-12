@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 import threading
 import time
-from service.monitor import HypervisorMonitor
+from meco.service.monitor import HypervisorMonitor
 
 
 class TestHypervisorMonitor(unittest.TestCase):

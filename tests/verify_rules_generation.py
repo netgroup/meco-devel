@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 # Adjust path to find modules
 sys.path.append("/home/ubuntu/meco-devel")
 
-from network.manager import NetworkManager
+from meco.network.manager import NetworkManager
 
 
 class TestRuleGeneration(unittest.TestCase):

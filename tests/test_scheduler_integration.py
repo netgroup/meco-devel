@@ -1,15 +1,15 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from emulation.lifecycle import LifecycleManager
-from emulation.scheduler import Scheduler
+from meco.emulation.lifecycle import LifecycleManager
+from meco.emulation.scheduler import Scheduler
 
 
 @pytest.fixture
 def lifecycle():
     with (
-        patch("emulation.lifecycle.IncusClient"),
-        patch("emulation.lifecycle.local_incus_client"),
-        patch("emulation.lifecycle.CONFIG") as mock_config,
+        patch("meco.emulation.lifecycle.IncusClient"),
+        patch("meco.emulation.lifecycle.local_incus_client"),
+        patch("meco.emulation.lifecycle.CONFIG") as mock_config,
     ):
         # Mock config to have some hypervisors
         mock_config.get.return_value = {
@@ -108,9 +108,9 @@ def test_lifecycle_mixed_assignment(lifecycle):
 def test_lifecycle_fallback_to_local():
     """Verify fallback to local if no remotes exist."""
     with (
-        patch("emulation.lifecycle.IncusClient"),
-        patch("emulation.lifecycle.local_incus_client"),
-        patch("emulation.lifecycle.CONFIG") as mock_config,
+        patch("meco.emulation.lifecycle.IncusClient"),
+        patch("meco.emulation.lifecycle.local_incus_client"),
+        patch("meco.emulation.lifecycle.CONFIG") as mock_config,
     ):
         mock_config.get.return_value = {}  # No remotes
         lm = LifecycleManager()

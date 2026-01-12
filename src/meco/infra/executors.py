@@ -18,6 +18,7 @@ class CommandExecutor(ABC):
         capture_output: bool = True,
         text: bool = True,
         background: bool = False,
+        timeout: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
         """
         Execute a command.
@@ -28,6 +29,7 @@ class CommandExecutor(ABC):
             capture_output: Capture stdout and stderr.
             text: Return output as text (str) instead of bytes.
             background: If True, attempt to run in background/detached mode (useful for SSH).
+            timeout: Timeout in seconds. Raises TimeoutExpired if exceeded.
         """
         pass
 
@@ -53,9 +55,14 @@ class LocalExecutor(CommandExecutor):
         capture_output: bool = True,
         text: bool = True,
         background: bool = False,
+        timeout: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
         return subprocess.run(
-            cmd, check=check, capture_output=capture_output, text=text
+            cmd,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
         )
 
     def upload_file(self, local_path: str, remote_path: str) -> bool:
@@ -91,6 +98,7 @@ class SshExecutor(CommandExecutor):
         capture_output: bool = True,
         text: bool = True,
         background: bool = False,
+        timeout: Optional[int] = None,
     ) -> subprocess.CompletedProcess:
         ssh_base = ["ssh", "-p", str(self.port)]
 
@@ -131,7 +139,11 @@ class SshExecutor(CommandExecutor):
         ssh_base.extend(cmd)
 
         return subprocess.run(
-            ssh_base, check=check, capture_output=capture_output, text=text
+            ssh_base,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
         )
 
     def upload_file(self, local_path: str, remote_path: str) -> bool:

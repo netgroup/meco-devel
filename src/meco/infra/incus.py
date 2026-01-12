@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+import subprocess
 from typing import List, Optional, Dict, Any, Union
 from .executors import CommandExecutor, LocalExecutor
 
@@ -31,7 +32,9 @@ class IncusClient:
         cmd = ["incus", "list", f"{remote}:", "--format=csv"]
         try:
             # Short command to check connectivity
-            result = self.executor.run(cmd, check=False, capture_output=True)
+            result = self.executor.run(
+                cmd, check=False, capture_output=True, timeout=60
+            )
             if result.returncode == 0:
                 return True
 
@@ -55,7 +58,7 @@ class IncusClient:
         """Gets the list of Incus instances."""
         cmd = ["incus", "list", f"--format={format_type}"]
         try:
-            res = self.executor.run(cmd, check=True, capture_output=True)
+            res = self.executor.run(cmd, check=True, capture_output=True, timeout=30)
             if format_type == "json":
                 return json.loads(res.stdout)
             return []  # CSV etc not strictly parsed here unless needed
@@ -133,6 +136,14 @@ class IncusClient:
                                     start_cmd, check=True, capture_output=True
                                 )
                                 logger.info(f"Sent start command for {name}")
+                                last_attempts[name] = now
+                            except subprocess.CalledProcessError as e:
+                                err_msg = e.stderr.strip() if e.stderr else str(e)
+                                logger.warning(
+                                    f"Failed to auto-start {name}: Exited with code {e.returncode}. Error: {err_msg}"
+                                )
+                                # Don't update last_attempts so we retry sooner? Or waiting is safer?
+                                # Let's update to prevent log spam if it's persistent error
                                 last_attempts[name] = now
                             except Exception as e:
                                 logger.error(f"Failed to auto-start {name}: {e}")
@@ -324,14 +335,39 @@ class IncusClient:
             # Basic support assuming file is reachable by the incus command
             cmd.extend(["-c", f"user.user-data=@{cloud_init_file}"])
 
-        try:
-            # Use background=True to support detached remote execution (SSH -f) to prevent hangs
-            self.executor.run(cmd, check=True, capture_output=True, background=True)
-            logger.info(f"Launched instance {name}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to launch {name}: {e}")
-            return False
+        # Retry logic for robust remote deployment
+        max_retries = 3
+        delay = 2
+        for attempt in range(max_retries):
+            try:
+                # Use background=True to support detached remote execution (SSH -f) to prevent hangs
+                self.executor.run(
+                    cmd, check=True, capture_output=True, background=True, timeout=90
+                )
+                logger.info(f"Launched instance {name}")
+                return True
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Timed out after 60s"
+                )
+            except subprocess.CalledProcessError as e:
+                err_msg = e.stderr.strip() if e.stderr else str(e)
+                logger.warning(
+                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Exited with code {e.returncode}. Error: {err_msg}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: {e}"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.error(
+                        f"Failed to launch {name} after {max_retries} attempts: {e}"
+                    )
+                    return False
+        return False
 
     def delete_instance(self, name: str, force: bool = True) -> bool:
         cmd = ["incus", "delete", name]

@@ -5,8 +5,9 @@ import logging
 logger = logging.getLogger("meco.config")
 
 # Constants extracted from meco.py
-CONFIG_PATH = "config/config.yaml"
-SCHEMA_PATH = "config/schema.yaml"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+SCHEMA_PATH = os.path.join(BASE_DIR, "schema.yaml")
 
 DEFAULT_CONFIG = {
     "defaults": {

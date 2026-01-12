@@ -5,15 +5,15 @@ import functools
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from config.loader import CONFIG
-from infra.executors import LocalExecutor, SshExecutor
-from infra.incus import IncusClient
-from network.manager import NetworkManager
-from network import ovs
-from emulation import generator
-from emulation.scheduler import Scheduler
+from meco.config.loader import CONFIG
+from meco.infra.executors import LocalExecutor, SshExecutor
+from meco.infra.incus import IncusClient
+from meco.network.manager import NetworkManager
+from meco.network import ovs
+from meco.emulation import generator
+from meco.emulation.scheduler import Scheduler
 
-from utils.logger import setup_logging
+from meco.utils.logger import setup_logging
 
 logger = setup_logging("meco.lifecycle")
 

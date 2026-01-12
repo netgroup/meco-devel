@@ -4,7 +4,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from unittest.mock import patch, mock_open, MagicMock
-from meco_test_client import (
+from meco.client import (
     open_editor_for_content,
     perform_rpc_call,
     get_running_instances,
@@ -85,8 +85,8 @@ class TestDeleteInstance:
 
 
 class TestPerformRPCCall:
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
     @patch("builtins.open", mock_open(read_data="key: value"))
     def test_start_with_filepath(self, mock_stub, mock_channel, tmp_path):
         test_file = tmp_path / "test.yaml"
@@ -95,40 +95,40 @@ class TestPerformRPCCall:
         args, _ = mock_stub.return_value.Start.call_args
         assert "key: value" in args[0].client_file_content
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
     def test_start_with_content(self, mock_stub, mock_channel):
         perform_rpc_call("start", content="foo: bar")
         args, _ = mock_stub.return_value.Start.call_args
         assert "foo: bar" in args[0].client_file_content
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
-    @patch("meco_test_client.open_editor_for_content", return_value=None)
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.open_editor_for_content", return_value=None)
     def test_start_with_empty_content_editor_none(
         self, mock_editor, mock_stub, mock_channel
     ):
         perform_rpc_call("start", content="")
         mock_editor.assert_called()
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
-    @patch("meco_test_client.get_running_instances", return_value=[{"name": "foo"}])
-    @patch("meco_test_client.delete_instance")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.get_running_instances", return_value=[{"name": "foo"}])
+    @patch("meco.client.delete_instance")
     def test_shutdown_success(self, mock_delete, mock_get, mock_stub, mock_channel):
         mock_stub.return_value.Shutdown.return_value.success = True
         perform_rpc_call("shutdown")
         mock_delete.assert_called_with("foo")
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
     def test_shutdown_failure(self, mock_stub, mock_channel):
         mock_stub.return_value.Shutdown.return_value.success = False
         perform_rpc_call("shutdown")
         # Should not raise, just log warning
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
     def test_start_grpc_unavailable(self, mock_stub, mock_channel):
         import grpc
 
@@ -138,8 +138,8 @@ class TestPerformRPCCall:
         with pytest.raises(SystemExit):
             perform_rpc_call("start", content="foo")
 
-    @patch("meco_test_client.grpc.insecure_channel")
-    @patch("meco_test_client.meco_pb2_grpc.MecoServiceStub")
+    @patch("meco.client.grpc.insecure_channel")
+    @patch("meco.client.meco_pb2_grpc.MecoServiceStub")
     def test_start_grpc_other_error(self, mock_stub, mock_channel):
         import grpc
 

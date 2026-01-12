@@ -7,10 +7,10 @@ from unittest.mock import Mock, patch
 import grpc
 import os
 import yaml
-from service.server import MecoService
-from config.loader import load_schema
-from meco import logger, UPLOADS_DIR
-import meco_pb2
+from meco.service.server import MecoService
+from meco.config.loader import load_schema
+from meco.main import logger, UPLOADS_DIR
+from meco import meco_pb2
 import io
 
 
@@ -217,7 +217,7 @@ class TestStartCommand:
 
     # --- Start Command - Save As Functionality Tests ---
     class TestSaveAs:
-        @patch("meco.UPLOADS_DIR")
+        @patch("meco.main.UPLOADS_DIR")
         def test_save_as_existing_file(
             self, mock_uploads_dir, servicer, context, tmp_path
         ):
@@ -237,7 +237,7 @@ class TestStartCommand:
                 or "cannot access local variable" in final_response.message
             )
 
-        @patch("meco.UPLOADS_DIR")
+        @patch("meco.main.UPLOADS_DIR")
         def test_save_as_without_extension(
             self, mock_uploads_dir, servicer, context, tmp_path
         ):
@@ -254,7 +254,7 @@ class TestStartCommand:
                 or "cannot access local variable" in final_response.message
             )
 
-        @patch("meco.UPLOADS_DIR")
+        @patch("meco.main.UPLOADS_DIR")
         def test_save_as_with_yml_extension(
             self, mock_uploads_dir, servicer, context, tmp_path
         ):
@@ -273,8 +273,8 @@ class TestStartCommand:
 
 
 class TestStatusMessages:
-    @patch("service.server.lifecycle")
-    @patch("service.server.validate_topology")
+    @patch("meco.service.server.lifecycle")
+    @patch("meco.service.server.validate_topology")
     def test_start_no_flows(self, mock_validate, mock_lifecycle, servicer, context):
         """Test the specific message when deployment succeeds but no flows are inserted."""
         # Mock validation success
@@ -297,8 +297,8 @@ class TestStatusMessages:
         )
         assert "no flows were inserted" in final_response.message
 
-    @patch("service.server.lifecycle")
-    @patch("service.server.validate_topology")
+    @patch("meco.service.server.lifecycle")
+    @patch("meco.service.server.validate_topology")
     def test_start_success_flows(
         self, mock_validate, mock_lifecycle, servicer, context
     ):
@@ -325,9 +325,9 @@ class TestStatusMessages:
         # But wait, I can't easily patch it here without changing method signature or decorator.
         # I'll add a new test method that patches logger specifically.
 
-    @patch("service.server.logger")
-    @patch("service.server.lifecycle")
-    @patch("service.server.validate_topology")
+    @patch("meco.service.server.logger")
+    @patch("meco.service.server.lifecycle")
+    @patch("meco.service.server.validate_topology")
     def test_start_logging(
         self, mock_validate, mock_lifecycle, mock_logger, servicer, context
     ):

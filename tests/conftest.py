@@ -4,8 +4,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pytest
 from unittest.mock import Mock
-from service.server import MecoService
-import meco_pb2
+from meco.service.server import MecoService
+from meco import meco_pb2
 
 
 @pytest.fixture

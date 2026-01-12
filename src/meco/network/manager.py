@@ -1,8 +1,8 @@
 import logging
-from config.loader import CONFIG
-from infra.executors import LocalExecutor
-from infra.incus import IncusClient
-from network import ovs
+from meco.config.loader import CONFIG
+from meco.infra.executors import LocalExecutor
+from meco.infra.incus import IncusClient
+from meco.network import ovs
 import re
 import time
 import json

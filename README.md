@@ -147,7 +147,7 @@ pip install -r requirements.txt
 
 # Compile gRPC
 python -m grpc_tools.protoc -I. \
-    --python_out=. --grpc_python_out=. meco.proto
+    --python_out=. --grpc_python_out=. meco/meco.proto
 ```
 
 ---
@@ -167,7 +167,7 @@ eval "$(register-python-argcomplete client)"
 This step allows you to run `meco` and `client` from anywhere:
 
 ```bash
-sudo ln -s $PWD/meco /usr/local/bin/meco
+sudo ln -s $PWD/meco-cli /usr/local/bin/meco
 sudo ln -s $PWD/client /usr/local/bin/client
 sudo chmod +x /usr/local/bin/meco /usr/local/bin/client
 ```
@@ -279,9 +279,9 @@ MECO uses YAML files to define network topologies and simulation parameters. You
 
 > **Tip:** Example YAML profiles are available in the `profiles/` directory.
 
-### Server Configuration (`config/config.yaml`)
+### Server Configuration (`meco/config/config.yaml`)
 
-The `config/config.yaml` file controls global settings and distributed deployment mapping.
+The `meco/config/config.yaml` file controls global settings and distributed deployment mapping.
 
 ```yaml
 defaults:
@@ -347,13 +347,16 @@ hypervisors:
 
 MECO is modularized into several key components:
 
-- **`meco/`**: Core server logic, daemon management, and entry points.
-- **`client/`**: Client-side CLI tools and gRPC interaction.
-- **`emulation/`**: Core emulation logic, lifecycle management (start/stop), and cloud-init generation.
-- **`network/`**: Network management, OpenFlow rule generation, and bridge configuration.
-- **`service/`**: gRPC server implementation and protocol buffer definitions.
-- **`infra/`**: Infrastructure abstractions (Incus client, Executors for local/SSH).
-- **`config/`**: Configuration loaders and schema validation.
+- **`src/`**: Source root.
+  - **`meco/`**: Source code package
+  - **`main.py`**: Entry point and daemon management.
+  - **`client.py`**: Client-side CLI tools.
+  - **`emulation/`**: Core emulation logic.
+  - **`network/`**: Network management and OpenFlow rules.
+  - **`service/`**: gRPC server implementation.
+  - **`infra/`**: Infrastructure abstractions.
+  - **`config/`**: Configuration loaders and schema validation.
+- **`topologies/`**: Topology examples.
 
 
 ---
@@ -448,5 +451,5 @@ Licensed under [Apache 2.0](https://github.com/netgroup/meco-devel/blob/main/LIC
 
 ## Further Resources
 
-- [Example Topology](Topologies/)
+- [Example Topology](topologies/)
 - [Issue Tracker](https://github.com/netgroup/meco-devel/issues)

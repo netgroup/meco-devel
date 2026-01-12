@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 import grpc
-import meco_pb2
-import meco_pb2_grpc
+from meco import meco_pb2
+from meco import meco_pb2_grpc
 import yaml
 import argparse
 import os
@@ -219,10 +219,12 @@ def perform_rpc_call(
                     )
 
             except grpc.RpcError as e:
-                logger.error(f"gRPC Error during shutdown: {e.details()}")
-                # If gRPC call itself failed, we might still try local cleanup if it's a connection issue
-                # or if the server might have partially processed the request before failing.
-                # For now, we'll just log the error and exit.
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    logger.error(
+                        "Meco server is not running or unreachable. It might be already off."
+                    )
+                else:
+                    logger.error(f"gRPC Error during shutdown: {e.details()}")
                 sys.exit(1)
 
     except grpc.RpcError as e:

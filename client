@@ -1,19 +1,15 @@
 #!/bin/bash
 
-# This script is a wrapper for the meco_test_client.py script.
-# It activates the virtual environment and runs the client script with all passed arguments.
+# This script is a wrapper for the meco client.
+# It activates the virtual environment and runs the client module with all passed arguments.
 
 # To make it globally accessible, create a symlink:
-#   sudo ln -s $HOME/meco-devel/meco_test_client.py /usr/local/bin/client
-
-# or copy the script to /usr/local/bin using:
-#   sudo cp meco /usr/local/bin/
+#   sudo ln -s $HOME/meco-devel/client /usr/local/bin/client
 
 # Check if the meco-devel directory exists
 if [ ! -d "$HOME/meco-devel" ]; then
     echo "Error: The folder $HOME/meco-devel does not exist."
     echo "Please verify the directory path and ensure you are running this command as the correct user."
-    echo "If needed, switch to the appropriate user and try again."
     exit 1
 fi
 
@@ -24,18 +20,12 @@ if [ ! -f "$HOME/meco-devel/venv/bin/activate" ]; then
     exit 1
 fi
 
-# Check if meco_test_client.py exists
-if [ ! -f "$HOME/meco-devel/meco_test_client.py" ]; then
-    echo "Error: The file meco_test_client.py does not exist."
-    echo "Please verify that the meco_test_client.py script is located in $HOME/meco-devel."
-    exit 1
-fi
-
 # Navigate to the project directory
 cd "$HOME/meco-devel"
 
 # Activate the virtual environment
 source venv/bin/activate
 
-# Run the Python script with all passed arguments
-python3 meco_test_client.py "$@"
+# Run the Python module with all passed arguments
+# Run the Python module with all passed arguments
+PYTHONPATH=src python3 -m meco.client "$@"

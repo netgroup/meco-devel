@@ -7,16 +7,16 @@ from unittest.mock import patch, Mock
 import os
 import logging
 import signal
-from meco_pb2 import ResourceDescriptor
-from meco import (
+from meco.meco_pb2 import ResourceDescriptor
+from meco.main import (
     server_on,
     server_off,
     server_status,
     PID_FILE,
     PID_LIST_FILE,
     is_running,
-    MecoServiceServicer,
 )
+from meco.meco_pb2_grpc import MecoServiceServicer
 
 servicer = MecoServiceServicer()
 
@@ -36,7 +36,7 @@ class TestServerOn:
     def test_server_on_basic(self, mock_setsid, mock_fork):
         """Test basic server_on functionality: forks, setsid, serve_forever called, PID file created."""
         mock_fork.side_effect = [0, 0]  # Simulate successful forks
-        with patch("meco.serve_forever") as mock_serve:
+        with patch("meco.main.serve") as mock_serve:
             mock_serve.return_value = None  # Ensure the mock returns immediately
             server_on()
         mock_serve.assert_called_once()
@@ -50,7 +50,7 @@ class TestServerOn:
         mock_fork.side_effect = [0, 0]
         with open(PID_FILE, "w") as f:
             f.write("1234\n")
-        with patch("meco.is_running", return_value=True):
+        with patch("meco.main.is_running", return_value=True):
             with caplog.at_level(logging.WARNING, logger="meco"):
                 # Expect SystemExit to be raised
                 with pytest.raises(SystemExit) as exc_info:
@@ -67,8 +67,8 @@ class TestServerOn:
         mock_fork.side_effect = [0, 0]
         with open(PID_FILE, "w") as f:
             f.write("1234\n")
-        with patch("meco.is_running", return_value=False):
-            with patch("meco.serve_forever") as mock_serve:
+        with patch("meco.main.is_running", return_value=False):
+            with patch("meco.main.serve") as mock_serve:
                 server_on()
         mock_serve.assert_called_once()
         assert os.path.exists(PID_LIST_FILE)
@@ -260,7 +260,7 @@ class TestServerStatus:
         """Test server_status when server is running (PID in file is valid)."""
         with open(PID_LIST_FILE, "w") as f:
             f.write("1234\n")
-        with patch("meco.is_running", return_value=True):
+        with patch("meco.main.is_running", return_value=True):
             with caplog.at_level(logging.INFO, logger="meco"):
                 server_status()
         assert (
@@ -271,7 +271,7 @@ class TestServerStatus:
         """Test server_status when server is not running (PID in file is invalid)."""
         with open(PID_LIST_FILE, "w") as f:
             f.write("1234\n")
-        with patch("meco.is_running", return_value=False):
+        with patch("meco.main.is_running", return_value=False):
             with caplog.at_level(logging.INFO, logger="meco"):
                 server_status()
         assert "Meco server is not running." in caplog.text
@@ -288,7 +288,7 @@ class TestServerStatus:
         """Test server_status with mixed valid and invalid PIDs."""
         with open(PID_LIST_FILE, "w") as f:
             f.write("1234\ninvalid\n5678\n")
-        with patch("meco.is_running", side_effect=[True, False]):
+        with patch("meco.main.is_running", side_effect=[True, False]):
             with caplog.at_level(logging.INFO, logger="meco"):
                 server_status()
         assert "running with the following process: [1234]" in caplog.text
@@ -427,7 +427,7 @@ def test_shutdown_flag_present(monkeypatch, tmp_path):
 
     flag = tmp_path / "activity.flag"
     flag.write_text("running")
-    monkeypatch.setattr("meco.ACTIVITY_FLAG", str(flag))
+    monkeypatch.setattr("meco.main.ACTIVITY_FLAG", str(flag))
     response = servicer.Shutdown(DummyRequest(), DummyContext())
     assert response.success
     assert not flag.exists()

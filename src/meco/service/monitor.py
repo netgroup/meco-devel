@@ -2,8 +2,8 @@ import threading
 import time
 import logging
 from typing import List, Dict
-from infra.incus import IncusClient
-from config.loader import CONFIG
+from meco.infra.incus import IncusClient
+from meco.config.loader import CONFIG
 
 logger = logging.getLogger("meco.monitor")
 
