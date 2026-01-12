@@ -30,7 +30,7 @@ graph TD
     C --> D[Validation Engine]
     C --> E[File Storage]
     D --> G[Instance Orchestrator]
-    G --> H[Instance Deployer (Container | System Container | VM)]
+    G --> H["Instance Deployer (Container | System Container | VM)"]
 ```
 
 ### gRPC Service Definition (`meco.proto`)
@@ -38,27 +38,51 @@ graph TD
 ```protobuf
 syntax = "proto3";
 
-service MecoService {
-  // Diagnostic echo endpoint
-  rpc MecoCall(MecoRequest) returns (MecoResponse);
+package meco;
+import "google/protobuf/empty.proto";
 
-  // Main configuration endpoint
-  // NOTE: Deployment target (container, system container, or VM) is now inferred from each node's type in the YAML configuration. The user does not specify this explicitly; the server determines the correct deployment mode for each node.
-  rpc Start(ResourceDescriptor) returns (StartResponse);
+// Define the gRPC service
+service MecoService {
+  // Start processing and Emulation (Supporting either a filename or inline file content)
+  rpc Start (ResourceDescriptor) returns (stream StartResponse);
+
+  // Existing RPC
+  rpc MecoCall (MecoRequest) returns (MecoResponse);
+
+  // Shutdown an ongoing emulation
+  rpc Shutdown(google.protobuf.Empty) returns (stream ShutdownResponse);
 }
 
+// Messages for MecoCall
+message MecoRequest {
+  string message = 1;
+}
+
+message MecoResponse {
+  string message = 1;
+}
+
+// Message used by the Start RPC
 message ResourceDescriptor {
   oneof file_data {
-    string server_file_path = 1;    // Path to existing server-side file
-    string client_file_content = 2; // Direct YAML content payload
+    string server_file_path = 1;    // File that already exists on the server
+    string client_file_content = 2; // // File content sent from the client
   }
-  optional string save_as = 3;      // Server-side persistence name
-  optional bool dry_run = 4;        // Validation-only mode flag
+  optional string save_as = 3; // Save on the server and start the testbed
+  optional bool dry_run = 4;   // Save file without starting the testbed
 }
 
+// Response from the Start RPC
 message StartResponse {
   bool success = 1;
   string message = 2;
+  string log_message = 3;
+}
+
+message ShutdownResponse {
+  bool success = 1;
+  string message = 2;
+  string log_message = 3;
 }
 ```
 
@@ -103,14 +127,17 @@ The project is structured into modular components to separate concerns and impro
 
 | Package | Purpose |
 | :--- | :--- |
-| **`meco/`** | **Entry Point**. Contains `meco.py`, daemon logic, signal handling, and CLI argument parsing (server-side). |
-| **`client/`** | **Client Wrapper**. Shell scripts and python logic for client CLI operation (`meco_test_client.py`). |
-| **`emulation/`** | **Core Logic**. Handles the lifecycle of emulations (`lifecycle.py`), node scheduling, and cloud-init generation (`generator.py`). |
-| **`network/`** | **Network Layer**. Manages OVS bridges, flow rules (`manager.py`), and localized network setup on hypervisors. |
-| **`service/`** | **RPC Interface**. Implements the gRPC server (`server.py`) and holds the compiled protobuf stubs. |
-| **`infra/`** | **Hardware Abstraction**. Provides `IncusClient` and executors (`local`, `ssh`) to interact with hypervisors transparently. |
-| **`config/`** | **Configuration**. Handles YAML loading, schema validation (`loader.py`), and default settings. |
-| **`utils/`** | **Utilities**. Logging setup, helper functions, and shared tools. |
+| **`src/`** | **Source Root**. Contains the `meco` package. |
+| **`src/meco/`** | **Package Root**. The main python package. |
+| **`src/meco/main.py`** | **Entry Point**. Daemon logic, signal handling, and CLI argument parsing (server-side). |
+| **`src/meco/client.py`** | **Client Logic**. Python logic for client CLI operation. |
+| **`src/meco/emulation/`** | **Core Logic**. Handles the lifecycle of emulations (`lifecycle.py`), node scheduling, and cloud-init generation (`generator.py`). |
+| **`src/meco/network/`** | **Network Layer**. Manages OVS bridges, flow rules (`manager.py`), and localized network setup on hypervisors. |
+| **`src/meco/service/`** | **RPC Interface**. Implements the gRPC server (`server.py`) and holds the compiled protobuf stubs. |
+| **`src/meco/infra/`** | **Hardware Abstraction**. Provides `IncusClient` and executors (`local`, `ssh`) to interact with hypervisors transparently. |
+| **`src/meco/config/`** | **Configuration**. Handles YAML loading, schema validation (`loader.py`), and default settings. |
+| **`src/meco/utils/`** | **Utilities**. Logging setup, helper functions, and shared tools. |
+| **`topologies/`** | **Topologies**. Contains YAML topology examples. |
 
 ---
 
@@ -169,13 +196,14 @@ source venv/bin/activate
 
 ```bash
 pip install -r requirements.txt
-pip install -r requirements-dev.txt  # For development tools (black, ruff, pytest, etc.)
+pip install -e .  # Install the package in editable mode (Critical for finding the 'meco' module)
+pip install pytest black ruff  # Install development tools
 ```
 
 ### 4. Compile Protobuf/gRPC Stubs
 
 ```bash
-python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. src/meco/meco.proto
 ```
 
 ### 5. (Optional) Enable CLI Auto-completion
@@ -205,8 +233,8 @@ eval "$(register-python-argcomplete client)"
 
 2. **Edit Code**
 
-   - Update Python modules in `meco-devel/meco.py`, `client`, etc.
-   - If you change the gRPC interface, update `meco.proto` and recompile stubs.
+   - Update Python modules in `src/meco/meco.py`, `src/meco/client.py`, etc.
+   - If you change the gRPC interface, update `src/meco/meco.proto` and recompile stubs.
 
 3. **Format and Lint**
 
@@ -241,7 +269,7 @@ eval "$(register-python-argcomplete client)"
 - Recompile stubs after changes:
 
   ```bash
-  python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. meco.proto
+  python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. src/meco/meco.proto
   ```
 
 - Update both server (`meco.py`) and client as needed.
@@ -278,15 +306,6 @@ tail -f /tmp/meco_client.log | jq
 
 ### 1. Unit Tests
 
-- Located in `tests/unit/`
-- Run with:
-
-  ```bash
-  pytest tests/unit -v
-  ```
-
-### 2. Integration Tests
-
 - Located in `tests/`
 - Run with:
 
@@ -294,14 +313,14 @@ tail -f /tmp/meco_client.log | jq
   pytest tests/ -v
   ```
 - Ensure both container and VM deployment paths are tested:
-  - Use a YAML sample for container-only deployment (e.g., `samples/containers_only.yaml`)
-  - Use a YAML sample with mixed container and VM roles (e.g., `samples/with_vm.yaml`)
+  - Use a YAML sample for container-only deployment (e.g., `topologies/containers_only.yaml`)
+  - Use a YAML sample with mixed container and VM roles (e.g., `topologies/with_vm.yaml`)
   - Example VM test:
     ```bash
-    client start --filepath samples/with_vm.yaml
+    client start --filepath topologies/with_vm.yaml
     ```
 
-### 3. Manual Testing
+### 2. Manual Testing
 
 - Start the server:
 
@@ -311,7 +330,7 @@ tail -f /tmp/meco_client.log | jq
 
 - Deploy a topology  
   ```bash
-  client start --filepath profiles/example.yaml --dryrun
+  client start --filepath topologies/example.yaml --dryrun
   ```
 
 - Check status:
@@ -327,7 +346,7 @@ tail -f /tmp/meco_client.log | jq
   client shutdown
   ```
 
-### 4. Debugging
+### 3. Debugging
 
 - Server introspection:
 
@@ -358,7 +377,6 @@ tail -f /tmp/meco_client.log | jq
 ## Future Roadmap <a id="future"></a>
 
 - [ ] TLS support for gRPC
-- [ ] Parallel deployment of instances
 - [ ] Adding Benchmarks
 
 ---

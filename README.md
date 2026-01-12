@@ -58,8 +58,8 @@ Here's the updated **Installation** section of your `README.md`, rewritten to fu
 
 | Requirement | Version                       |
 | ----------- | ----------------------------- |
-| Python      | 3.8+                          |
-| Incus       | 6.16+                     |
+| Python      | 3.10+                         |
+| Incus       | 6.16+                         |
 | OS          | Ubuntu 22.04+, ideally 24.04+ |
 
 ---
@@ -147,7 +147,7 @@ pip install -r requirements.txt
 
 # Compile gRPC
 python -m grpc_tools.protoc -I. \
-    --python_out=. --grpc_python_out=. meco/meco.proto
+    --python_out=. --grpc_python_out=. src/meco/meco.proto
 ```
 
 ---
@@ -258,11 +258,11 @@ MECO uses YAML files to define network topologies and simulation parameters. You
 
 - **Upload a local YAML file:**
   ```bash
-  client start --filepath config.yaml
+  client start --filepath topology.yaml
   ```
 - **Use a server-side YAML file:**
   ```bash
-  client start --filename saved_config.yaml
+  client start --filename topology.yaml
   ```
 - **Directly input YAML content (opens Nano editor):**
   ```bash
@@ -270,18 +270,18 @@ MECO uses YAML files to define network topologies and simulation parameters. You
   ```
 - **Validate only (no execution):**
   ```bash
-  client start --filepath config.yaml --dryrun
+  client start --filepath topology.yaml --dryrun
   ```
 - **Save configuration on server:**
   ```bash
-  client start --filepath config.yaml --saveas my_config
+  client start --filepath topology.yaml --saveas my_topology
   ```
 
-> **Tip:** Example YAML profiles are available in the `profiles/` directory.
+> **Tip:** Example YAML topologies are available in the `topologies/` directory.
 
-### Server Configuration (`meco/config/config.yaml`)
+### Server Configuration (`src/meco/config/config.yaml`)
 
-The `meco/config/config.yaml` file controls global settings and distributed deployment mapping.
+The `src/meco/config/config.yaml` file controls global settings and distributed deployment mapping.
 
 ```yaml
 defaults:
@@ -320,7 +320,7 @@ hypervisors:
 | --------------- | ------------------------------------------- | ------------------ |
 | `on`            | Start server                                | `meco on`          |
 | `off`           | Stop server                                | `meco off`         |
-| `off --force`   | Stop server **and** auto-teardown emulation | `meco off --force` |
+| `off --force` **or** `off -f`   | Auto-teardown emulation **and** Stop server | `meco off --force` |
 | `status`        | Show server status                          | `meco status`      |
 
 > **Note:** Without `--force`, `meco off` will refuse to stop if an emulation is active.
@@ -348,14 +348,15 @@ hypervisors:
 MECO is modularized into several key components:
 
 - **`src/`**: Source root.
-  - **`meco/`**: Source code package
-  - **`main.py`**: Entry point and daemon management.
-  - **`client.py`**: Client-side CLI tools.
-  - **`emulation/`**: Core emulation logic.
-  - **`network/`**: Network management and OpenFlow rules.
-  - **`service/`**: gRPC server implementation.
-  - **`infra/`**: Infrastructure abstractions.
-  - **`config/`**: Configuration loaders and schema validation.
+  - **`meco/`**: Source code package.
+    - **`main.py`**: Entry point and daemon management.
+    - **`client.py`**: Client-side CLI tools.
+    - **`emulation/`**: Core emulation logic.
+    - **`network/`**: Network management and OpenFlow rules.
+    - **`service/`**: gRPC server implementation.
+    - **`infra/`**: Infrastructure abstractions.
+    - **`config/`**: Configuration loaders and schema validation.
+    - **`meco.proto`**: gRPC service definition.
 - **`topologies/`**: Topology examples.
 
 
@@ -419,10 +420,6 @@ incus list --format=json | jq -r '.[] | select(.config["user.meco"]=="true").nam
 
 - The `--dryrun` flag performs full JSON-Schema validation of your YAML.
 - If validation fails, error details are printed and **no instances are launched**.
-
-### Known Limitations
-
-- **Sequential Teardown**: While deployment is parallelized, teardown currently processes hypervisors sequentially (though fast).
 
 ---
 
