@@ -6,379 +6,314 @@ A comprehensive guide for contributing to and extending the MECO emulator system
 
 ## Table of Contents
 
-- [API Architecture](#architecture)
-- [Codebase Organization](#codebase-organization)
-- [Infrastructure Abstraction](#infra-abstraction)
-- [Development Environment Setup](#dev-setup)
-- [Development Workflow](#development-workflow)
-- [Protobuf & gRPC](#protobuf-grpc)
-- [Logging & Monitoring](#logging)
-- [Testing Strategies](#testing)
-- [Contribution Guidelines](#contribution)
-- [Future Roadmap](#future)
+1. [Introduction](#introduction)
+2. [Getting Started](#getting-started)
+3. [System Architecture](#system-architecture)
+4. [Project Structure](#project-structure)
+5. [Core Concepts](#core-concepts)
+6. [Development Workflow](#development-workflow)
+7. [How-To Guides](#how-to-guides)
+8. [Debugging & Troubleshooting](#debugging--troubleshooting)
+9. [Release & Contribution](#release--contribution)
 
 ---
 
-## API Architecture <a id="architecture"></a>
+## 1. Introduction <a id="introduction"></a>
 
-### Core Components Diagram
+The **MEga COnstellation Emulator (MECO)** is designed to simulate large-scale Low Earth Orbit (LEO) satellite networks. For developers, the project's core goals are:
 
-```mermaid
-graph TD
-    A[Client] -->|gRPC| B[Server]
-    B --> C{YAML Processor}
-    C --> D[Validation Engine]
-    C --> E[File Storage]
-    D --> G[Instance Orchestrator]
-    G --> H["Instance Deployer (Container | System Container | VM)"]
-```
+- **Modularity**: Separation of concerns between the gRPC interface, core emulation logic, and infrastructure management.
+- **Scalability**: Supporting hundreds of nodes by distributing workloads across multiple hypervisors.
+- **Abstraction**: Hiding the complexity of disparate execution environments (containers, VMs, remote hosts) behind a unified API.
 
-### gRPC Service Definition (`meco.proto`)
-
-```protobuf
-syntax = "proto3";
-
-package meco;
-import "google/protobuf/empty.proto";
-
-// Define the gRPC service
-service MecoService {
-  // Start processing and Emulation (Supporting either a filename or inline file content)
-  rpc Start (ResourceDescriptor) returns (stream StartResponse);
-
-  // Existing RPC
-  rpc MecoCall (MecoRequest) returns (MecoResponse);
-
-  // Shutdown an ongoing emulation
-  rpc Shutdown(google.protobuf.Empty) returns (stream ShutdownResponse);
-}
-
-// Messages for MecoCall
-message MecoRequest {
-  string message = 1;
-}
-
-message MecoResponse {
-  string message = 1;
-}
-
-// Message used by the Start RPC
-message ResourceDescriptor {
-  oneof file_data {
-    string server_file_path = 1;    // File that already exists on the server
-    string client_file_content = 2; // // File content sent from the client
-  }
-  optional string save_as = 3; // Save on the server and start the testbed
-  optional bool dry_run = 4;   // Save file without starting the testbed
-}
-
-// Response from the Start RPC
-message StartResponse {
-  bool success = 1;
-  string message = 2;
-  string log_message = 3;
-}
-
-message ShutdownResponse {
-  bool success = 1;
-  string message = 2;
-  string log_message = 3;
-}
-```
-
-### Key Architectural Features
-
-#### Server-Side Components
-
-- **YAML Validation Pipeline**:
-  - Syntax validation using PyYAML
-  - Semantic validation (minimum node requirements)
-  - Dependency resolution check
-- **Resource Management**:
-  - PID-based process tracking
-  - Graceful shutdown sequence
-  - File versioning in `/tmp/meco_uploads`
-- **gRPC Interface**:
-  - Thread-pooled request handling
-  - Structured error propagation
-- **Instance Orchestrator** (formerly Execution Engine):
-  - Determines deployment mode for each node based on its type (e.g., Satellite → app container, Router → system container, NetworkOrchestrator → VM)
-  - Uses `incus launch` with `--vm` flag for VMs, or standard container launch for others
-  - Maintains a registry of all active instances (containers and VMs)
-
-#### Client-Side Components
-
-- **Configuration Management**:
-  - Interactive Nano editor integration
-  - File diffing for version comparisons
-  - Batch processing support
-- **Connection Management**:
-  - Automatic retry logic
-  - Timeout handling
-  - TLS support (future)
-- **Instance Cleanup Logic**:
-  - The client automatically deletes both containers and VMs associated with MECO deployments (not just containers)
+This guide will help you understand the internal mechanics of MECO so you can fix bugs, add features, or adapt it to new research needs.
 
 ---
 
-## Codebase Organization <a id="codebase-organization"></a>
+## 2. Getting Started <a id="getting-started"></a>
 
-The project is structured into modular components to separate concerns and improve maintainability:
+### Prerequisites
 
-| Package | Purpose |
-| :--- | :--- |
-| **`src/`** | **Source Root**. Contains the `meco` package. |
-| **`src/meco/`** | **Package Root**. The main python package. |
-| **`src/meco/main.py`** | **Entry Point**. Daemon logic, signal handling, and CLI argument parsing (server-side). |
-| **`src/meco/client.py`** | **Client Logic**. Python logic for client CLI operation. |
-| **`src/meco/emulation/`** | **Core Logic**. Handles the lifecycle of emulations (`lifecycle.py`), node scheduling, and cloud-init generation (`generator.py`). |
-| **`src/meco/network/`** | **Network Layer**. Manages OVS bridges, flow rules (`manager.py`), and localized network setup on hypervisors. |
-| **`src/meco/service/`** | **RPC Interface**. Implements the gRPC server (`server.py`) and holds the compiled protobuf stubs. |
-| **`src/meco/infra/`** | **Hardware Abstraction**. Provides `IncusClient` and executors (`local`, `ssh`) to interact with hypervisors transparently. |
-| **`src/meco/config/`** | **Configuration**. Handles YAML loading, schema validation (`loader.py`), and default settings. |
-| **`src/meco/utils/`** | **Utilities**. Logging setup, helper functions, and shared tools. |
-| **`topologies/`** | **Topologies**. Contains YAML topology examples. |
+| Component | Requirement | Notes |
+| :--- | :--- | :--- |
+| **OS** | Ubuntu 22.04+ | 24.04+ Recommended for native Incus support. |
+| **Python** | 3.10+ | Core language for Server and Client. |
+| **Incus** | 6.x+ | Application container & VM manager. |
+| **QEMU** | `qemu-system` | Required if running Virtual Machines. |
 
----
+### Environment Setup
 
-## Infrastructure Abstraction <a id="infra-abstraction"></a>
-
-MECO runs on a distributed set of hypervisors but manages them as a unified resource. This is achieved through the **Infrastructure Abstraction Layer** located in `infra/`.
-
-### The Executor Pattern
-
-The system uses the **Strategy Pattern** to decouple *what* command to run from *where* to run it.
-
-- **`CommandExecutor` (ABC)**: Defines the interface for running commands and uploading files.
-- **`LocalExecutor`**: Uses python's `subprocess` to run commands on the local machine.
-- **`SshExecutor`**: Wraps commands to execute on a remote host via SSH.
-
-#### SSH Optimization
-The `SshExecutor` is highly optimized for performance and reliability:
-- **Multiplexing**: Uses `ControlMaster` and `ControlPersist` to reuse a single SSH connection for multiple commands, eliminating handshake overhead.
-- **Non-blocking**: Supports background execution (`-f`) for fire-and-forget tasks like launching instances.
-- **Batch Mode**: Disables interactive prompts to prevent hanging on automation.
-
-### Incus Client Wrapper
-
-The `IncusClient` is a high-level wrapper around the `incus` CLI. It requires an `executor` at initialization:
-
-```python
-# Initializing for local use
-local_client = IncusClient(executor=LocalExecutor())
-
-# Initializing for remote use
-ssh_executor = SshExecutor(host="10.0.0.5", user="ubuntu")
-remote_client = IncusClient(executor=ssh_executor)
-```
-
-Methods in `IncusClient` (e.g., `launch_instance`, `create_network`) simply build the appropriate `incus` command lists and pass them to `self.executor.run()`. This ensures that the core logic in `LifecycleManager` remains identical whether deploying to `localhost` or a remote cluster.
-
----
-
-## Development Environment Setup <a id="dev-setup"></a>
-
-### 1. Clone the Repository
+#### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/netgroup/meco-devel.git
 cd meco-devel
 ```
 
-### 2. Python Virtual Environment
+#### 2. Set up Python Environment
+
+It is highly recommended to use a virtual environment:
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-### 3. Install Dependencies
+#### 3. Install Dependencies
+
+Install the package in **editable mode** (`-e`). This allows changes in `src/` to be immediately reflected without re-installing.
 
 ```bash
 pip install -r requirements.txt
-pip install -e .  # Install the package in editable mode (Critical for finding the 'meco' module)
-pip install pytest black ruff  # Install development tools
+pip install -e .
+pip install pytest black ruff grpcio-tools  # Dev tools
 ```
 
-### 4. Compile Protobuf/gRPC Stubs
+#### 4. Configure Local Incus
+
+Ensure your user is part of the `incus-admin` group and Incus is initialized:
+
+```bash
+# Check group membership
+groups | grep incus-admin
+
+# Initialize if needed (default settings are usually fine)
+incus admin init
+```
+
+#### 5. Verify Setup
+
+Run a quick test to ensure the environment is healthy:
+
+```bash
+pytest tests/test_cli.py -v
+```
+
+---
+
+## 3. System Architecture <a id="system-architecture"></a>
+
+MECO follows a client-server architecture where a lightweight CLI client controls a persistent background daemon (Server).
+
+### High-Level Diagram
+
+```mermaid
+graph LR
+    User[Developer/User] -->|CLI Commands| Client
+    
+    subgraph "MECO Server"
+        GRPC[gRPC Service]
+        Orch[Instance Orchestrator]
+        Net[Network Manager]
+    end
+    
+    subgraph "Infrastructure Layer"
+        Incus[IncusClient Wrapper]
+        Local[Local Executor]
+        Remote[SSH Executor]
+    end
+    
+    Client -->|gRPC / Port 50051| GRPC
+    GRPC --> Orch
+    Orch --> Net
+    
+    Orch -->|Uses| Incus
+    Net -->|Uses| Incus
+    
+    Incus -->|Dispatch| Local
+    Incus -->|Dispatch| Remote
+    
+    Local -->|Manage| Host1[Local Host]
+    Remote -->|Manage| Host2[Remote Host]
+```
+
+### Key Components
+
+1.  **Server (`meco-daemon`)**:
+    -   Single-threaded control loop for safety.
+    -   Manages the lifecycle of the emulation.
+    -   Validates topologies before deployment.
+
+2.  **Client (`meco-client`)**:
+    -   A thin wrapper around gRPC stubs.
+    -   Handles file uploads and user interaction.
+
+3.  **Infrastructure Layer**:
+    -   **Executor Pattern**: Abstracts *where* a command runs (`LocalExecutor` vs `SshExecutor`).
+    -   **IncusClient**: A python wrapper that translates high-level requests (e.g., "launch node") into Incus CLI commands.
+
+4.  **Networking**:
+    -   Uses Open vSwitch (OVS) for wiring nodes.
+    -   **`br-int`**: Integration bridge for local connections.
+    -   **`br-tun`**: VXLAN tunnel bridge for cross-hypervisor communication.
+
+---
+
+## 4. Project Structure <a id="project-structure"></a>
+
+The codebase is organized as a standard Python package in `src/meco`.
+
+| Path | Description |
+| :--- | :--- |
+| **`src/meco/`** | **Package Root** |
+| `├── main.py` | Server entry point & signal handling. |
+| `├── client.py` | Client CLI logic. |
+| `├── meco.proto` | gRPC service definition. |
+| **`src/meco/emulation/`** | **Core Logic** |
+| `├── lifecycle.py` | The "brain" managing start/stop sequences. |
+| `├── generator.py` | Generates cloud-init configs for nodes. |
+| **`src/meco/network/`** | **Networking** |
+| `├── manager.py` | OVS bridge & flow rule management. |
+| **`src/meco/infra/`** | **Hardware Abstraction** |
+| `├── client.py` | `IncusClient` wrapper class. |
+| `├── executors.py` | `LocalExecutor` and `SshExecutor` classes. |
+| **`src/meco/service/`** | **API Layer** |
+| `├── server.py` | Implementation of the gRPC `MecoService`. |
+| **`src/meco/config/`** | **Configuration** |
+| `├── loader.py` | YAML loading and schema validation. |
+
+---
+
+## 5. Core Concepts <a id="core-concepts"></a>
+
+### The Lifecycle of a `start` Command
+
+1.  **Request**: User runs `client start --filepath topo.yaml`.
+2.  **Transport**: Client reads file, sends `Start(ResourceDescriptor)` RPC.
+3.  **Validation**: Server uses `config.loader` to validate the YAML schema and check for cycles or missing dependencies.
+4.  **Orchestration**:
+    -   `LifecycleManager` calculates which nodes go to which hypervisor (based on `config.yaml` or scheduler).
+    -   It initializes an `IncusClient` for each target hypervisor.
+5.  **Deployment**:
+    -   Base profiles are created.
+    -   Instances are launched in parallel.
+    -   `NetworkManager` programs OVS rules.
+6.  **Response**: Server streams status updates back to the client.
+
+### Infrastructure Abstraction
+
+MECO treats remote hypervisors exactly like the local one.
+-   **`LocalExecutor`**: Runs commands using `subprocess.run`.
+-   **`SshExecutor`**: Wraps the command in `ssh <host> ...`. It uses connection multiplexing (`ControlMaster`) to keep the session open, making remote commands almost as fast as local ones.
+
+### gRPC & Protobufs
+
+ The API is defined in `src/meco/meco.proto`.
+-   **Service**: `MecoService`
+-   **RPCs**: `Start`, `Shutdown`, `MecoCall`
+
+When you change `.proto`, you must regenerate the Python code (see [Development Workflow](#development-workflow)).
+
+---
+
+## 6. Development Workflow <a id="development-workflow"></a>
+
+### Code Style
+We follow PEP 8. Please run these tools before committing:
+
+```bash
+black .   # Formatter
+ruff check .   # Linter
+```
+
+### Running Tests
+
+**Unit Tests**:
+```bash
+pytest tests/ -v
+```
+
+**Integration Tests**:
+The best way to verify changes is to run the local topology:
+```bash
+# 1. Start Server
+meco on
+
+# 2. Deploy Topology
+client start --filepath topologies/example.yaml
+
+# 3. Check Status
+meco status
+
+# 4. Cleanup
+client shutdown
+```
+
+### Updating Dependencies
+If you add a new library:
+1.  Add it to `requirements.txt`.
+2.  Run `pip install -r requirements.txt`.
+
+### Regenerating gRPC Code
+If you modify `src/meco/meco.proto`, run:
 
 ```bash
 python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. src/meco/meco.proto
 ```
-
-### 5. (Optional) Enable CLI Auto-completion
-
-```bash
-eval "$(register-python-argcomplete meco)"
-eval "$(register-python-argcomplete client)"
-```
-
-### 6. Incus Setup (for local emulation)
-
-- Ensure Incus is installed and initialized (see main README).
-- Add your user to the `incus-admin` group and re-login.
-- For VM support, ensure `qemu-system` is installed on your system.
+*Note: This generates `src/meco/meco_pb2.py` and `src/meco/meco_pb2_grpc.py`. These files should be committed.*
 
 ---
 
-## Development Workflow <a id="development-workflow"></a>
+## 7. How-To Guides <a id="how-to-guides"></a>
 
-### Making Code Changes
+### How to Add a New Node Type
 
-1. **Create a Feature Branch**
+1.  **Update Validation**: Modify `src/meco/emulation/validation.py` (if rigid types exist) or ensures the schema allows it.
+2.  **Update Cloud-Init**: If the new node requires special boot config, edit `src/meco/emulation/generator.py`.
+3.  **Define Image**: Ensure `config.yaml` or the topology specifies a valid image for this type.
 
-   ```bash
-   git checkout -b feature/my-feature
-   ```
+### How to Add a New RPC Method
 
-2. **Edit Code**
-
-   - Update Python modules in `src/meco/meco.py`, `src/meco/client.py`, etc.
-   - If you change the gRPC interface, update `src/meco/meco.proto` and recompile stubs.
-
-3. **Format and Lint**
-
-   ```bash
-   black .
-   ruff .
-   ```
-
-4. **Run Tests**
-
-   ```bash
-   pytest tests/ -v
-   ```
-
-5. **Commit and Push**
-
-   ```bash
-   git add .
-   git commit -m "Describe your change"
-   git push origin feature/my-feature
-   ```
-
-6. **Open a Pull Request**
-
-   - Follow the contribution guidelines for PRs.
-
----
-
-## Protobuf & gRPC <a id="protobuf-grpc"></a>
-
-- Edit `meco.proto` to change the API.
-- Recompile stubs after changes:
-
-  ```bash
-  python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. src/meco/meco.proto
-  ```
-
-- Update both server (`meco.py`) and client as needed.
-
----
-
-## Logging & Monitoring <a id="logging"></a>
-
-### Log Structure
-
-```python
-{
-  "timestamp": "YYYY-MM-DD HH:MM:SS",
-  "component": "server|client",
-  "level": "INFO|WARN|ERROR",
-  "operation": "Start|Validate|Persist",
-  "instance_type": "container|vm",  # Use this field for clarity in future logs
-  "duration_ms": 45,
-  "message": "Descriptive message",
-  "metadata": {}
-}
-```
-
-### Viewing Logs
-
-```bash
-tail -f /tmp/meco_server.log | jq
-tail -f /tmp/meco_client.log | jq
-```
-
----
-
-## Testing Strategies <a id="testing"></a>
-
-### 1. Unit Tests
-
-- Located in `tests/`
-- Run with:
-
-  ```bash
-  pytest tests/ -v
-  ```
-- Ensure both container and VM deployment paths are tested:
-  - Use a YAML sample for container-only deployment (e.g., `topologies/containers_only.yaml`)
-  - Use a YAML sample with mixed container and VM roles (e.g., `topologies/with_vm.yaml`)
-  - Example VM test:
-    ```bash
-    client start --filepath topologies/with_vm.yaml
+1.  **Edit Proto**: Add the RPC definition to `src/meco/meco.proto`.
+    ```protobuf
+    rpc MyNewMethod (MyRequest) returns (MyResponse);
     ```
-
-### 2. Manual Testing
-
-- Start the server:
-
-  ```bash
-  meco on
-  ```
-
-- Deploy a topology  
-  ```bash
-  client start --filepath topologies/example.yaml --dryrun
-  ```
-
-- Check status:
-
-  ```bash
-  meco status
-  # Output now lists both containers and VMs under active instances
-  ```
-
-- Shutdown:
-
-  ```bash
-  client shutdown
-  ```
-
-### 3. Debugging
-
-- Server introspection:
-
-  ```bash
-  meco status
-  # Shows all active containers and VMs
-  ```
-
-- gRPC debugging:
-
-  ```bash
-  GRPC_VERBOSITY=DEBUG GRPC_TRACE=all meco on
-  ```
+2.  **Regenerate**: Run the `protoc` command.
+3.  **Implement Server**: Add the method to `MecoService` class in `src/meco/service/server.py`.
+4.  **Implement Client**: Add a CLI command in `src/meco/client.py` that calls the stub.
 
 ---
 
-## Contribution Guidelines <a id="contribution"></a>
+## 8. Debugging & Troubleshooting <a id="debugging--troubleshooting"></a>
 
-- Fork the repository and create a feature branch from `main`.
-- Keep commits atomic and descriptive.
-- Rebase before merging.
-- Run all tests and linters before submitting a PR.
-- Squash merge for features.
-- If modifying deployment logic, ensure VM/container compatibility is preserved.
+### Logs
+
+Logs are your best friend. They are written to `/tmp/`.
+
+-   **Server Log**: `/tmp/meco_server.log`
+-   **Client Log**: `/tmp/meco_client.log`
+
+To watch them live, use the built-in commands:
+```bash
+meco logs     # Tails /tmp/meco_server.log
+client logs   # Tails /tmp/meco_client.log
+```
+
+### Debugging with Incus Directly
+Since MECO just wraps Incus, you can inspect the state manually:
+
+```bash
+# List all instances
+incus list
+
+# Enter a container
+incus exec <instance-name> -- bash
+```
+
+### Common Issues
+-   **"Port map empty"**: Usually means the instances didn't start correctly or the OVS bridge isn't seeing the ports. Check `ovs-vsctl show`.
+-   **gRPC Error**: If `client` fails to connect, check if `meco-daemon` is running (`ps aux | grep meco`).
 
 ---
 
-## Future Roadmap <a id="future"></a>
+## 9. Release & Contribution <a id="release--contribution"></a>
 
-- [ ] TLS support for gRPC
-- [ ] Adding Benchmarks
+### Pull Request Checklist
+-   [ ] Branch created from `main`.
+-   [ ] `black` and `ruff` passed.
+-   [ ] `pytest` passed.
+-   [ ] Manual deployment test passed.
+-   [ ] PR description explains the *why*, not just the *what*.
 
----
-
-**For any questions or support, open a GitHub issue or contact the maintainers.**
+### Versioning
+MECO uses Semantic Versioning (Major.Minor.Patch). Bump the version in `setup.py` for significant changes.

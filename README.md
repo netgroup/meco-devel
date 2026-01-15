@@ -2,169 +2,123 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-A scalable emulator for LEO mega constellation networks. Designed to support research, testing, and development of networking protocols and systems.
-
----
-
-## Key Features
-
-- **Real-time gRPC API** (Port 50051)
-- **Flexible YAML Configuration** (File, Inline, or Nano Editor)
-- **Validation Engine** (Syntax & Semantic checks)
-- **Persistent Server Management** (PID tracking)
-- **Single-run Emulation guard** (Using activity flag)
-- **Structured Logging** (Server & Client logs, colored and labeled in terminal)
-- **System / App containers & VMs**
-- **Easy Integration** (Python API, CLI, gRPC)
-- **Parallel launch of nodes** (configurable thread-pool) for faster spin-up.
-
----
-
-## Key Concepts
-
-MECO supports three instance types, mapped automatically by node kind:
-
-| Category             | How MECO deploys it                          | Example node-types                           |
-| -------------------- | -------------------------------------------- | -------------------------------------------- |
-| **App container**    | Lightweight container (single process)       | `SatelliteBig`, `SatelliteSmall`, `Terminal` |
-| **System container** | Full OS container (systemd, routing daemons) | `Router`, `Gateway`                          |
-| **VM**               | Hardware-virtualised Incus VM                | `NetworkOrchestrator`                        |
-
-This mapping is hard-coded for user convenience.
+MECO is a scalable, distributed emulator designed for LEO (Low Earth Orbit) mega-constellation networks. It enables researchers and developers to simulate complex satellite networks with high fidelity, supporting real-time control and hybrid deployment of lightweight application containers, system containers, and virtual machines.
 
 ---
 
 ## Table of Contents
 
-1. [Installation](#installation)
-2. [Wrapper Setup](#wrapper-setup)
-3. [Quick Start](#quick-start)
-4. [Configuration Guide](#configuration-guide)
-5. [Command Reference](#command-reference)
-6. [Troubleshooting](#troubleshooting)
-7. [Project Structure](#project-structure)
-8. [Contributing](#contributing)
-9. [License](#license)
+1. [Key Features](#key-features)
+2. [Architecture](#architecture)
+3. [Prerequisites](#prerequisites)
+4. [Installation](#installation)
+5. [Quick Start](#quick-start)
+6. [Configuration Guide](#configuration-guide)
+7. [Distributed Emulation](#distributed-emulation)
+8. [Command Reference](#command-reference)
+9. [Troubleshooting](#troubleshooting)
+10. [Contributing](#contributing)
+11. [License](#license)
 
 ---
 
-Here's the updated **Installation** section of your `README.md`, rewritten to fully reflect the new Incus setup guidance:
+## 1. Key Features <a id="key-features"></a>
+
+-   **Hybrid Node Support**: Seamlessly mix lightweight **App Containers** (processes), full **System Containers** (services/routing), and **VMs** (kernels) in a single topology.
+-   **Distributed Emulation**: Scale beyond a single machine by distributing nodes across multiple physical hypervisors.
+-   **Dynamic Topology**: Define orbits, satellites, and ground stations using flexible YAML configurations.
+-   **Real-time Control**: Interact with the emulation via a gRPC API (Port 50051) for dynamic rule updates and monitoring.
+-   **High-Fidelity Networking**: Built on **Open vSwitch (OVS)** to model realistic delays, bandwidth constraints, and packet loss.
+-   **Parallel Deployment**: Configurable thread pools for fast spin-up of large-scale networks.
 
 ---
 
-## Installation <a id="installation"></a>
+## 2. Architecture <a id="architecture"></a>
 
-### Prerequisites
+MECO follows a client-server architecture designed for scalability and modularity.
 
-| Requirement | Version                       |
-| ----------- | ----------------------------- |
-| Python      | 3.10+                         |
-| Incus       | 6.16+                         |
-| OS          | Ubuntu 22.04+, ideally 24.04+ |
-
----
-
-### Step 1: Install Incus
-
-Check your Ubuntu version:
-
-```bash
-lsb_release -a
+```mermaid
+graph TD
+    Client[Client CLI/API] -->|gRPC| Server[MECO Server Daemon]
+    Server -->|Manage| Incus[Incus Hypervisor]
+    Server -->|Configure| OVS[Open vSwitch]
+    Incus -->|Run| Nodes["Satellites / Terminals / Gateways"]
+    OVS -->|Connect| Nodes
 ```
 
-#### 🔹 For Ubuntu 24.04+ (native support):
+### Node Types
 
+MECO automatically maps generic node types to specific Incus resources for optimal resource usage:
+
+| Node Type | Underlying Tech | Use Case | Example |
+| :--- | :--- | :--- | :--- |
+| **App Container** | Process Container | Lightweight apps, simple forwarding | `Satellite`, `Terminal` |
+| **System Container** | Full OS Container | Complex routing, background services | `Router`, `Gateway` |
+| **VM** | Virtual Machine | Custom kernels, heavy isolation | `NetworkOrchestrator` |
+
+---
+
+## 3. Prerequisites <a id="prerequisites"></a>
+
+Ensure your environment meets these requirements before installation:
+
+| Requirement | Version | Notes |
+| :--- | :--- | :--- |
+| **OS** | Ubuntu 22.04 / 24.04 LTS | Recommended for native Incus support. |
+| **Python** | 3.10+ | Required for server and client. |
+| **Incus** | 6.16+ | **Critical dependency** for container/VM management. |
+
+**Dependencies**: Open vSwitch, `btrfs-progs` (if using Btrfs storage), `iproute2`.
+
+---
+
+## 4. Installation <a id="installation"></a>
+
+### 4.1. Install Incus
+
+Incus is the core hypervisor manager.
+
+**For Ubuntu 24.04+:**
 ```bash
 sudo apt update
-sudo apt install incus qemu-system
-# Optional if migrating from LXD:
-sudo apt install incus-tools
+sudo apt install incus qemu-system incus-tools
 ```
 
-#### 🔹 For Ubuntu 20.04 / 22.04 (recommended via Zabbly):
+**For Ubuntu 20.04/22.04:**
+Follow the official [Zabbly repository instructions](https://github.com/zabbly/incus) to get the latest stable version.
 
-Follow official instructions:
-👉 [https://github.com/zabbly/incus](https://github.com/zabbly/incus)
-
-These packages are actively maintained and include all Incus features.
-
----
-
-### Step 2: Post-install configuration
-
-#### Add your user to the `incus-admin` group:
-
+**Initialize Incus:**
 ```bash
-sudo groupadd incus-admin  # only if it doesn't already exist
+# Add user to admin group
 sudo usermod -aG incus-admin $USER
-```
+newgrp incus-admin
 
-Then re-login (or run `newgrp incus-admin`) to apply group membership.
-
-> **Security tip**: Only trusted users should belong to `incus-admin`.
-> This group allows **full control** over containers and VMs.
-
-#### Initialize Incus with:
-
-```bash
+# Initialize (Default settings are usually fine)
 incus admin init
 ```
 
-You’ll be prompted to configure:
+### 4.2. Install MECO
 
-* Whether to use clustering (select **no** for standalone)
-* A **storage pool** (ZFS or Btrfs recommended)
-* A **network bridge** (e.g., `incusbr0` with auto IP)
-* Optionally, a **remote listener** for TLS management
-* Whether to print a **YAML preseed** at the end
-
-##### Example (loop-backed Btrfs with bridge):
-
-```bash
-sudo apt install btrfs-progs  # if using btrfs
-incus admin init
-```
-
-> You can re-run this at any time to reconfigure or dump a `preseed.yaml`:
-
-```bash
-incus admin init --dump > preseed.yaml
-incus admin init --preseed < preseed.yaml
-```
-
----
-
-### Step 3: Set up MECO
+Clone the repository and set up the Python environment:
 
 ```bash
 git clone https://github.com/netgroup/meco-devel.git
 cd meco-devel
 
-# Python environment
+# Create and activate virtual environment
 python3 -m venv venv
 source venv/bin/activate
+
+# Install Python dependencies
 pip install -r requirements.txt
 
-# Compile gRPC
-python -m grpc_tools.protoc -I. \
-    --python_out=. --grpc_python_out=. src/meco/meco.proto
+# Compile gRPC definitions
+python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. src/meco/meco.proto
 ```
 
----
+### 4.3. Setup Wrapper Scripts
 
-
-### (Optional) Enable CLI Auto-completion
-
-```bash
-eval "$(register-python-argcomplete meco)"
-eval "$(register-python-argcomplete client)"
-```
-
----
-
-## Wrapper Setup <a id="wrapper-setup"></a>
-
-This step allows you to run `meco` and `client` from anywhere:
+Create symlinks to run `meco` and `client` commands globally:
 
 ```bash
 sudo ln -s $PWD/meco-cli /usr/local/bin/meco
@@ -172,281 +126,159 @@ sudo ln -s $PWD/client /usr/local/bin/client
 sudo chmod +x /usr/local/bin/meco /usr/local/bin/client
 ```
 
-### Verify Installation
+---
 
-```bash
-which meco client  # Should show /usr/local/bin paths
-```
+## 5. Quick Start <a id="quick-start"></a>
+
+1.  **Start the Server**:
+    ```bash
+    meco on
+    ```
+
+2.  **Deploy a Topology**:
+    ```bash
+    # Verify your topology schema first
+    client start --filepath topologies/testbed1.yaml --dryrun
+
+    # Deploy the topology
+    client start --filepath topologies/testbed1.yaml
+    ```
+
+3.  **Check Status**:
+    ```bash
+    meco status
+    ```
+
+4.  **Monitor Logs**:
+    ```bash
+    meco logs   # or tail -f /tmp/meco_server.log
+    ```
+
+5.  **Teardown**:
+    ```bash
+    client shutdown
+    ```
+
+6.  **Stop Server**:
+    ```bash
+    meco off
+    ```
 
 ---
 
-## Quick Start <a id="quick-start"></a>
+## 6. Configuration Guide <a id="configuration-guide"></a>
 
-### Basic Workflow
+MECO is configured via two main files: the **Topology** (per emulation) and the **Server Config** (global).
 
-```bash
-meco on                                  # 1. start daemon
-client start --filepath topology.yaml    # 2. deploy
-meco status                               # 3. check status
-client shutdown                           # 4. tear-down
-meco off                                  # 5. stop daemon
-```
+### 6.1. Topology Configuration (`topology.yaml`)
 
-**Note:** Only one emulation can run at a time. If you try to start a second while one is active, you'll see:
-```
-Emulation based on "topology.yaml" is running. please shut it down before starting a new one.
-```
+Defines the network graph, including nodes, links, and visibility windows.
 
-### Live Log Monitoring
-
-```bash
-tail -f /tmp/meco_server.log  # Server logs (colored output)
-tail -f /tmp/meco_client.log  # Client logs (colored output)
-```
-
-### YAML Example
-
-A minimal configuration with a `NetworkOrchestrator` node:
-
-```yaml
 ```yaml
 topology:
   orbital-plane: 1
-  sat-orbital-plane: 1
 
 node-types:
   - type: Satellite
-    interfaces:
-      - connects-to: Terminal
     properties:
       image: "satellite.img"
-  - type: Terminal
-    interfaces:
-      - connects-to: Satellite
-    properties:
-      image: "terminal.img"
 
 nodes:
   - id: 0
     type: Satellite
     latitude: 0.0
     longitude: 0.0
-    altitude: 550000
-    orbital-plane: 0
-  - id: 1
-    type: Terminal
-    latitude: 0.0
-    longitude: 0.0
-    altitude: 0
-    orbital-plane: 0
 
 visibility-ground:
   - time: 0
     connection:
       - source: 1
         destination: 0
-        delay: 20
-        loss: 0
         bandwidth: 50
 ```
 
----
+### 6.2. Server Configuration (`src/meco/config/config.yaml`)
 
-## Configuration Guide <a id="configuration-guide"></a>
-
-MECO uses YAML files to define network topologies and simulation parameters. You can:
-
-- **Upload a local YAML file:**
-  ```bash
-  client start --filepath topology.yaml
-  ```
-- **Use a server-side YAML file:**
-  ```bash
-  client start --filename topology.yaml
-  ```
-- **Directly input YAML content (opens Nano editor):**
-  ```bash
-  client start --content
-  ```
-- **Validate only (no execution):**
-  ```bash
-  client start --filepath topology.yaml --dryrun
-  ```
-- **Save configuration on server:**
-  ```bash
-  client start --filepath topology.yaml --saveas my_topology
-  ```
-
-> **Tip:** Example YAML topologies are available in the `topologies/` directory.
-
-### Server Configuration (`src/meco/config/config.yaml`)
-
-The `src/meco/config/config.yaml` file controls global settings and distributed deployment mapping.
+Controls global settings and distributed mapping.
 
 ```yaml
 defaults:
-  # Infrastructure settings
   integration_bridge: "br-int"
   tunnel_bridge: "br-tun"
   storage_pool: "default"
-  
-  # Default images
   image_container: "images:ubuntu/22.04"
-  image_vm: "images:ubuntu/noble"
 
 hypervisors:
   hv1:
-    instances:
-      - "1-Satellite"  # Explicitly pin this instance to hv1
     ip: "10.55.0.186"
+    instances:
+      - "1-Satellite"  # Pinned instance
   hv2:
-    instances: []      # Available for dynamic scheduling
     ip: "10.55.0.225"
+    instances: []      # Available for dynamic scheduling
 ```
-
-**Key Sections:**
-- **`defaults`**: Defines base resources like Incus profiles, bridges, and default OS images.
-- **`hypervisors`**: maps remote machines for distributed emulation.
-  - **`instances`**: List of specific node IDs (e.g. `0-Satellite`) to force-deploy on this node. If empty or omitted, the scheduler may assign any unpinned node here.
-  - **`ip`**: SSH address of the remote worker.
 
 ---
 
-## Command Reference <a id="command-reference"></a>
+## 7. Distributed Emulation <a id="distributed-emulation"></a>
 
-### Server Management
+MECO transparently supports running instances across multiple physical machines.
 
-| Command         | Description                                 | Example            |
-| --------------- | ------------------------------------------- | ------------------ |
-| `on`            | Start server                                | `meco on`          |
-| `off`           | Stop server                                | `meco off`         |
-| `off --force` **or** `off -f`   | Auto-teardown emulation **and** Stop server | `meco off --force` |
-| `status`        | Show server status                          | `meco status`      |
+1.  **Prepare Remote Nodes**:
+    -   Install Incus and MECO dependencies on all worker nodes.
+    -   Ensure SSH access from the master node to workers (preferably key-based).
 
-> **Note:** Without `--force`, `meco off` will refuse to stop if an emulation is active.
+2.  **Configure `config.yaml`**:
+    -   Add each worker under the `hypervisors` section.
+    -   Specify their IP addresses.
 
-### Client Operations
-
-| Command/Flag    | Description                                      | Example                                          |
-| -------------- | ------------------------------------------------ | ------------------------------------------------ |
-| `start`        | Start processing topology and deploy             | `client start ...`                               |
-| `shutdown`     | Gracefully stop active emulation & delete instances | `client shutdown`                             |
-
-#### Start Options
-| Flag           | Description                                      | Example                                          |
-| -------------- | ------------------------------------------------ | ------------------------------------------------ |
-| `--filepath`   | Upload local YAML                                | `client start --filepath config.yaml`            |
-| `--filename`   | Use server-side file                             | `client start --filename saved_config.yaml`      |
-| `--content`    | Direct YAML input                                | `client start --content`                         |
-| `--saveas`     | Save configuration                               | `client start --filepath cfg.yaml --saveas prod` |
-| `--dryrun`     | Validate only (full JSON-Schema validation)      | `client start --filepath cfg.yaml --dryrun`      |
+3.  **Run**:
+    -   The `meco` server on the master node orchestrates deployment.
+    -   Bridges (`br-int`, `br-tun`) and VXLAN tunnels are automatically created to link nodes across hypervisors.
 
 ---
 
-## Project Structure <a id="project-structure"></a>
+## 8. Command Reference <a id="command-reference"></a>
 
-MECO is modularized into several key components:
+### Server CLI (`meco`)
 
-- **`src/`**: Source root.
-  - **`meco/`**: Source code package.
-    - **`main.py`**: Entry point and daemon management.
-    - **`client.py`**: Client-side CLI tools.
-    - **`emulation/`**: Core emulation logic.
-    - **`network/`**: Network management and OpenFlow rules.
-    - **`service/`**: gRPC server implementation.
-    - **`infra/`**: Infrastructure abstractions.
-    - **`config/`**: Configuration loaders and schema validation.
-    - **`meco.proto`**: gRPC service definition.
-- **`topologies/`**: Topology examples.
+| Command | Description |
+| :--- | :--- |
+| `meco on` | Starts the MECO daemon (background process). |
+| `meco off` | Stops the daemon. Use `-f` to force clean active emulations. |
+| `meco status` | Checks if the server is running and lists active PIDs. |
+| `meco logs` | Tails the server logs. |
 
+### Client CLI (`client`)
 
----
-
-## Troubleshooting <a id="troubleshooting"></a>
-
-### Common Issues
-
-**Server won't start:**
-
-```bash
-# Force remove existing PID
-rm -f /tmp/meco_server.pid
-meco on
-```
-
-**Missing dependencies:**
-
-```bash
-deactivate && rm -rf venv
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-**gRPC connection issues:**
-
-```bash
-lsof -i :50051  # Check port availability
-```
-
-**Permission denied for wrapper scripts:**
-
-```bash
-sudo chmod +x /usr/local/bin/meco /usr/local/bin/client
-```
-
-**Manual cleanup of all MECO-tagged instances:**
-
-```bash
-incus list --format=json | jq -r '.[] | select(.config["user.meco"]=="true") | .name' | xargs -I{} incus delete {} --force
-```
-
-**Incus permission error**
-```bash
-sudo usermod -aG incus-admin $USER && re-login
-```
-
-**Validation fails**
-```bash
-run `client start --dryrun` and read schema path in error
-```
-
-**Left-over instances**
-```bash
-incus list --format=json | jq -r '.[] | select(.config["user.meco"]=="true").name' | xargs -r incus delete --force
-```
-
-### Schema validation & dry-run
-
-- The `--dryrun` flag performs full JSON-Schema validation of your YAML.
-- If validation fails, error details are printed and **no instances are launched**.
+| Command | Flag | Description |
+| :--- | :--- | :--- |
+| `client start` | `--filepath <file>` | Load and deploy a local YAML topology. |
+| | `--filename <name>` | Deploy a file already present on the server. |
+| | `--dryrun` | Validate the topology schema without deploying. |
+| | `--saveas <name>` | Save the uploaded configuration on the server. |
+| `client shutdown` | | Gracefully stop the current emulation and clean up resources. |
+| `client logs` | | View the client logs. |
 
 ---
 
-## Contributing <a id="contributing"></a>
+## 9. Troubleshooting <a id="troubleshooting"></a>
 
-We welcome contributions! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request (PR) with tests
-
-See [Development Workflow](Development.md) for detailed guidelines.
+-   **"Port map empty"**: Usually means instances didn't start correctly or failed to report their network interfaces. Check `meco logs`.
+-   **"Address already in use"**: The gRPC port (50051) is taken. Check for zombie python processes (`ps aux | grep main.py`) or old meco instances.
+-   **Incus permissions**: Ensure your user is in the `incus-admin` group and you have re-logged in.
+-   **Leftover Resources**: If a crash occurs, use `meco off -f` to force cleanup, or manually remove instances with `incus delete <name> --force`.
 
 ---
 
-## License <a id="license"></a>
+## 10. Contributing <a id="contributing"></a>
 
-Licensed under [Apache 2.0](https://github.com/netgroup/meco-devel/blob/main/LICENSE).
+We welcome contributions! Please see [Development.md](Development.md) for detailed guidelines on:
 
----
+-   Code Style & Linting
+-   Running Tests
+-   Submitting Pull Requests
 
-> **Maintainers**: Stefano Salsano, Max Miraftab  
-> **Support**: Open an issue on [GitHub](https://github.com/netgroup/meco-devel/issues)
+## 11. License <a id="license"></a>
 
----
-
-## Further Resources
-
-- [Example Topology](topologies/)
-- [Issue Tracker](https://github.com/netgroup/meco-devel/issues)
+This project is licensed under the **Apache 2.0 License**.
