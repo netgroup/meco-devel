@@ -7,6 +7,7 @@ import signal
 import time
 import psutil
 import argcomplete
+import subprocess
 
 # Ensure package is in path content
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -226,6 +227,29 @@ def server_status():
             pass
 
 
+def server_logs(follow=True, lines=50):
+    """
+    Tails the server log file.
+    """
+    log_file = "/tmp/meco_server.log"
+    if not os.path.exists(log_file):
+        print(f"Log file {log_file} does not exist yet. Is the server running?")
+        return
+
+    cmd = ["tail", "-n", str(lines)]
+    if follow:
+        cmd.append("-f")
+    cmd.append(log_file)
+
+    try:
+        # Use simple subprocess call to takeover
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"Error reading logs: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="MECO Emulator (Modular Refactor)")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -238,6 +262,16 @@ def main():
 
     subparsers.add_parser("status", help="Show Server Status")
 
+    log_parser = subparsers.add_parser("logs", help="View Server Logs")
+    log_parser.add_argument(
+        "-n", "--lines", type=int, default=50, help="Number of lines to show"
+    )
+    log_parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="Do not follow output (just show last N lines)",
+    )
+
     argcomplete.autocomplete(parser)
     args = parser.parse_args()
 
@@ -247,6 +281,8 @@ def main():
         server_off(force=args.force)
     elif args.command == "status":
         server_status()
+    elif args.command == "logs":
+        server_logs(follow=not args.no_follow, lines=args.lines)
     else:
         parser.print_help()
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import grpc
+import copy
 from meco import meco_pb2
 from meco import meco_pb2_grpc
 import yaml
@@ -25,6 +26,7 @@ class LogColors:
 
 class ClientColorFormatter(logging.Formatter):
     def format(self, record):
+        record = copy.copy(record)
         level_color = {
             "DEBUG": LogColors.GRAY,
             "INFO": LogColors.GREEN,
@@ -38,12 +40,22 @@ class ClientColorFormatter(logging.Formatter):
         return super().format(record)
 
 
+# 1. Console Handler
 handler = logging.StreamHandler()
 handler.setFormatter(ClientColorFormatter("%(levelname)s %(message)s"))
 
+# 2. File Handler
+file_handler = logging.FileHandler("/tmp/meco_client.log")
+file_handler.setFormatter(
+    ClientColorFormatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[handler],
+    handlers=[handler, file_handler],
 )
 
 logger = logging.getLogger("meco-client")
@@ -235,6 +247,28 @@ def perform_rpc_call(
         sys.exit(1)
 
 
+def client_logs(follow=True, lines=50):
+    """
+    Tails the client log file.
+    """
+    log_file = "/tmp/meco_client.log"
+    if not os.path.exists(log_file):
+        print(f"Log file {log_file} does not exist yet.")
+        return
+
+    cmd = ["tail", "-n", str(lines)]
+    if follow:
+        cmd.append("-f")
+    cmd.append(log_file)
+
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"Error reading logs: {e}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Meco YAML Client")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -266,9 +300,22 @@ if __name__ == "__main__":
         "shutdown", help="Shut down running deployment"
     )
 
+    # LOGS command
+    log_parser = subparsers.add_parser("logs", help="View Client Logs")
+    log_parser.add_argument(
+        "-n", "--lines", type=int, default=50, help="Number of lines to show"
+    )
+    log_parser.add_argument(
+        "--no-follow",
+        action="store_true",
+        help="Do not follow output (just show last N lines)",
+    )
+
     args = parser.parse_args()
     if args.command == "shutdown":
         perform_rpc_call("shutdown")
+    elif args.command == "logs":
+        client_logs(follow=not args.no_follow, lines=args.lines)
     else:
         perform_rpc_call(
             args.command,
