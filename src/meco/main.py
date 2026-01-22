@@ -17,9 +17,10 @@ from meco.emulation.lifecycle import LifecycleManager
 from meco.network.manager import NetworkManager
 from meco.infra.incus import IncusClient
 from meco.config.loader import CONFIG
+from meco.infra.executors import SshExecutor
 
 # Logging Setup
-from meco.utils.logger import setup_logging
+from meco.utils.logger import setup_logging, LogColors
 
 logger = setup_logging("meco.main")
 
@@ -203,28 +204,82 @@ def server_off(force=False):
 
 def server_status():
     """Checks server status."""
+    # 1. Check Local Server Process
     running = False
+    pid_status = "NOT running"
+
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE, "r") as f:
                 pid = int(f.read().strip())
             if is_running(pid):
-                logger.info(f"Meco server is RUNNING (PID: {pid})")
+                pid_status = f"{LogColors.GREEN}RUNNING (PID: {pid}){LogColors.RESET}"
                 running = True
             else:
-                logger.info("Meco server is NOT running (stale PID file).")
+                pid_status = (
+                    f"{LogColors.RED}NOT running (stale PID file){LogColors.RESET}"
+                )
         except (OSError, ValueError):
-            logger.info("Meco server is NOT running.")
-    else:
-        logger.info("Meco server is NOT running.")
+            pass
+
+    # Use logger for consistent formatting
+    logger.info(f"Meco Server: {pid_status}")
 
     if running and os.path.exists(ACTIVITY_FLAG):
         try:
             with open(ACTIVITY_FLAG, "r") as f:
                 content = f.read().strip()
-            logger.info(f"Active Emulation: {content}")
+            logger.info(f"Active Emulation: {LogColors.CYAN}{content}{LogColors.RESET}")
         except (OSError, ValueError):
             pass
+
+    # 2. Check Hypervisors
+    hypervisors = CONFIG.get("hypervisors", {})
+    if hypervisors:
+        logger.info("Hypervisors:")
+        for name, data in sorted(hypervisors.items()):
+            if not data:
+                continue
+            ip = data.get("ip")
+            if not ip:
+                continue
+
+            status = "Checking..."
+            details = ""
+            color = LogColors.YELLOW
+
+            try:
+                # Connect with short timeout
+                executor = SshExecutor(host=ip, user="ubuntu")
+                # Just check SSH connectivity
+                executor.run(["true"], timeout=3, check=True)
+
+                # Check Incus presence
+                client = IncusClient(executor)
+                if client.check_installed():
+                    status = "Online"
+                    color = LogColors.GREEN
+                else:
+                    status = "Online (Incus Missing)"
+                    color = LogColors.YELLOW
+            except subprocess.TimeoutExpired:
+                status = "Offline"
+                details = "Timeout"
+                color = LogColors.RED
+            except subprocess.CalledProcessError:
+                status = "Offline"
+                details = "SSH Error"
+                color = LogColors.RED
+            except Exception as e:
+                status = "Unreachable"
+                details = str(e)
+                color = LogColors.RED
+
+            msg = f"  {name:<6} {ip:<15} {color}[{status}]{LogColors.RESET}"
+            if details:
+                msg += f" ({details})"
+
+            logger.info(msg)
 
 
 def server_logs(follow=True, lines=50):

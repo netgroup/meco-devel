@@ -30,14 +30,18 @@ from meco.service.monitor import HypervisorMonitor
 
 logger = setup_logging("meco.service")
 
-lifecycle = LifecycleManager()
-monitor = HypervisorMonitor()
+lifecycle = None
+monitor = None
 
 
 class MecoService(meco_pb2_grpc.MecoServiceServicer):
     """
     gRPC Service implementation delegating to LifecycleManager.
     """
+
+    def __init__(self, lifecycle_manager, hypervisor_monitor):
+        self.lifecycle = lifecycle_manager
+        self.monitor = hypervisor_monitor
 
     def Start(self, request, context):
         try:
@@ -70,7 +74,10 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
                 pass
 
             # 4. Execute
-            for item in lifecycle.start_emulation(parsed_yaml, dry_run=request.dry_run):
+            # 4. Execute
+            for item in self.lifecycle.start_emulation(
+                parsed_yaml, dry_run=request.dry_run
+            ):
                 if isinstance(item, str):
                     yield meco_pb2.StartResponse(success=True, log_message=item)
                 elif isinstance(item, dict):
@@ -99,7 +106,7 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
 
     def Shutdown(self, request, context):
         try:
-            for item in lifecycle.stop_emulation(force=True):
+            for item in self.lifecycle.stop_emulation(force=True):
                 if isinstance(item, str):
                     yield meco_pb2.ShutdownResponse(success=True, log_message=item)
                 elif isinstance(item, bool):
@@ -120,16 +127,21 @@ class MecoService(meco_pb2_grpc.MecoServiceServicer):
 
 
 def serve(port=50051, max_workers=10):
+    lifecycle_instance = LifecycleManager()
+    monitor_instance = HypervisorMonitor()
+
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
-    meco_pb2_grpc.add_MecoServiceServicer_to_server(MecoService(), server)
+    meco_pb2_grpc.add_MecoServiceServicer_to_server(
+        MecoService(lifecycle_instance, monitor_instance), server
+    )
     server.add_insecure_port(f"[::]:{port}")
     server.start()
     logger.info(f"Meco gRPC server started on port {port}.")
 
     # Start Monitor
-    monitor.start()
+    monitor_instance.start()
 
     server.wait_for_termination()
 
     # Stop Monitor on exit
-    monitor.stop()
+    monitor_instance.stop()
