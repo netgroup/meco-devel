@@ -1,6 +1,3 @@
-import hashlib
-
-
 def generate_cloudinit(node):
     """
     Build a #cloud-config snippet.
@@ -57,3 +54,19 @@ def generate_arp_rules(all_ports):
         arp_actions = ",".join(f"output:{p}" for p in all_ports)
         return [f"priority=150,arp,actions={arp_actions}"]
     return []
+
+
+def generate_mac(node_id, port_index=0):
+    """
+    Generates a deterministic MAC address based on Node ID and Port Index.
+    Format: 02:00:PP:00:HH:LL
+    Where PP is port_index, HH:LL is node_id.
+    """
+    try:
+        nid = int(node_id)
+        # 02 (Locally Administered) : 00 : Port : 00 : High : Low
+        return (
+            f"02:00:{port_index & 0xFF:02x}:00:{nid >> 8 & 0xFF:02x}:{nid & 0xFF:02x}"
+        )
+    except (ValueError, TypeError):
+        return "00:00:00:00:00:00"

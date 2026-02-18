@@ -254,7 +254,17 @@ class LifecycleManager:
         )
 
         # Tag the instance for identifying ownership
+        # Generate Deterministic MAC
+        try:
+            node_id = name.split("-")[0]
+            # Primary interface (eth0)
+            mac_addr = generator.generate_mac(node_id, port_index=0)
+        except Exception:
+            mac_addr = None
+
         instance_config = {"user.meco": "true"}
+        if mac_addr:
+            instance_config["volatile.eth0.hwaddr"] = mac_addr
 
         logger.info(f"Launching {name} on {remote or 'local'}...")
         # Note: launching with background=True (implied by SshExecutor changes)
