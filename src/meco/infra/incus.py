@@ -43,9 +43,37 @@ class IncusClient:
                 x in stderr
                 for x in ["timeout", "unable to connect", "connection refused"]
             ):
-                logger.error(
-                    f"Incus remote '{remote}' is unreachable or in stopped state"
-                )
+                # Check if it might be a local instance with the same name
+                # This often happens when users run hypervisors as nested VMs
+                try:
+                    # Try to exec into it. If this works, the VM is up but API is down.
+                    # We assume the remote name matches the instance name.
+                    logger.debug(
+                        f"Remote '{remote}' unreachable. Checking if it matches a local instance..."
+                    )
+                    local_check = self.executor.run(
+                        ["incus", "exec", remote, "--", "true"],
+                        check=False,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    if local_check.returncode == 0:
+                        logger.error(
+                            f"Hypervisor '{remote}' is RUNNING locally but its Incus API is unreachable."
+                        )
+                        logger.error(
+                            f"To enable the API, run:\n  incus exec {remote} -- incus config set core.https_address [::]:8443"
+                        )
+                    else:
+                        logger.error(
+                            f"Incus remote '{remote}' is unreachable or in stopped state"
+                        )
+                except Exception:
+                    # Fallback to original error if local check fails/blows up
+                    logger.error(
+                        f"Incus remote '{remote}' is unreachable or in stopped state"
+                    )
+
                 return False
             else:
                 logger.warning(f"Unknown error connecting to '{remote}': {stderr}")
@@ -87,7 +115,7 @@ class IncusClient:
 
         # Track last start attempt for each instance to avoid spamming start commands
         last_attempts = {}
-        RETRY_INTERVAL = 10  # Seconds between start retries
+        RETRY_INTERVAL = 30  # Seconds between start retries
 
         while time.time() - start_time < timeout:
             if not remaining:
@@ -96,12 +124,26 @@ class IncusClient:
             try:
                 # Get status of all instances in one call
                 cmd = ["incus", "list", "--format=json"]
-                result = self.executor.run(cmd, check=True, capture_output=True)
+                # Use a timeout to prevent hanging indefinitely on bad connections
+                result = self.executor.run(
+                    cmd, check=True, capture_output=True, timeout=15
+                )
                 data = json.loads(result.stdout)
 
-                current_states = {
-                    item["name"]: item["state"]["status"] for item in data
-                }
+                current_states = {}
+                for item in data:
+                    # Robustly handle missing or None state data
+                    state_data = item.get("state")
+                    if (
+                        state_data
+                        and isinstance(state_data, dict)
+                        and "status" in state_data
+                    ):
+                        current_states[item["name"]] = state_data["status"]
+                    else:
+                        logger.warning(
+                            f"Incomplete state data for instance: {item.get('name')}"
+                        )
 
                 # Check which ones are ready
                 done = set()
@@ -109,6 +151,8 @@ class IncusClient:
                     s = current_states.get(name)
                     if not s:
                         continue
+
+                    # logger.debug(f"Seeing state '{s}' for {name}")
 
                     # Case insensitive check
                     if s.lower() == state.lower():
@@ -133,15 +177,37 @@ class IncusClient:
                             start_cmd = ["incus", "start", name]
                             try:
                                 self.executor.run(
-                                    start_cmd, check=True, capture_output=True
+                                    start_cmd,
+                                    check=True,
+                                    capture_output=True,
+                                    timeout=30,
                                 )
                                 logger.info(f"Sent start command for {name}")
                                 last_attempts[name] = now
+                            except subprocess.TimeoutExpired:
+                                logger.warning(
+                                    f"Auto-start for {name} timed out after 30s"
+                                )
+                                last_attempts[name] = now
                             except subprocess.CalledProcessError as e:
                                 err_msg = e.stderr.strip() if e.stderr else str(e)
-                                logger.warning(
-                                    f"Failed to auto-start {name}: Exited with code {e.returncode}. Error: {err_msg}"
-                                )
+                                if "busy" in err_msg or "operation" in err_msg:
+                                    logger.info(
+                                        f"Instance {name} is busy (likely creating). Waiting..."
+                                    )
+                                elif (
+                                    "already running" in err_msg
+                                    or "already started" in err_msg
+                                ):
+                                    # Recovery success! Instance is actually running despite what list said
+                                    logger.info(
+                                        f"Instance {name} reported as running by start command. Marking as ready."
+                                    )
+                                    done.add(name)
+                                else:
+                                    logger.warning(
+                                        f"Failed to auto-start {name}: Exited with code {e.returncode}. Error: {err_msg}"
+                                    )
                                 # Don't update last_attempts so we retry sooner? Or waiting is safer?
                                 # Let's update to prevent log spam if it's persistent error
                                 last_attempts[name] = now
@@ -340,15 +406,15 @@ class IncusClient:
         delay = 2
         for attempt in range(max_retries):
             try:
-                # Use background=True to support detached remote execution (SSH -f) to prevent hangs
+                # Synchronous execution to ensure we catch launch errors (e.g. image download failure)
                 self.executor.run(
-                    cmd, check=True, capture_output=True, background=True, timeout=90
+                    cmd, check=True, capture_output=True, background=False, timeout=300
                 )
                 logger.info(f"Launched instance {name}")
                 return True
             except subprocess.TimeoutExpired:
                 logger.warning(
-                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Timed out after 60s"
+                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Timed out after 120s"
                 )
             except subprocess.CalledProcessError as e:
                 err_msg = e.stderr.strip() if e.stderr else str(e)

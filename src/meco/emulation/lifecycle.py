@@ -181,14 +181,23 @@ class LifecycleManager:
                 )
             )
 
-        # 1. Launch all nodes in parallel (Fire & Forget)
+        # 1. Prime Connections (Avoid SSH ControlPath race conditions)
+        logger.info("Priming connections to hypervisors...")
+        unique_remotes = set([r for r in node_map.values() if r])
+        for remote in unique_remotes:
+            client = self.clients.get(remote)
+            if client:
+                # Run a lightweight command to establish the ControlMaster connection synchronously
+                client.check_installed()
+
+        # 2. Launch all nodes in parallel (Fire & Forget)
         # SshExecutor with background=True means this returns almost instantly
         with ThreadPoolExecutor(max_workers=16) as pool:
             futures = [pool.submit(t) for t in tasks]
             for fut in as_completed(futures):
                 fut.result()
 
-        # 2. Wait for all nodes to be ready (Bulk Check)
+        # 3. Wait for all nodes to be ready (Bulk Check)
         self._wait_for_deployment(node_map)
 
     def _wait_for_deployment(self, node_map):
