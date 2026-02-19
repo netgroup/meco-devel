@@ -381,10 +381,14 @@ class IncusClient:
         config: Dict[str, str] = None,
         is_vm: bool = False,
         cloud_init_file: str = None,
+        devices: Dict[str, Dict[str, str]] = None,
     ) -> bool:
         """
         Launches an Incus instance.
+        If devices are provided, uses 'init' -> 'config device add' -> 'start' workflow.
+        Otherwise uses 'launch'.
         """
+        # Base arguments construction
         cmd = ["incus", "launch", image, name]
         if is_vm:
             cmd.append("--vm")
@@ -398,42 +402,97 @@ class IncusClient:
             for k, v in config.items():
                 cmd.extend(["-c", f"{k}={v}"])
         if cloud_init_file:
-            # Basic support assuming file is reachable by the incus command
             cmd.extend(["-c", f"user.user-data=@{cloud_init_file}"])
 
-        # Retry logic for robust remote deployment
-        max_retries = 3
-        delay = 2
-        for attempt in range(max_retries):
+        # Decide workflow
+        if devices:
+            # 1. Init
+            # We need to switch 'launch' to 'init'
+            # Create a copy or modify in place? Modifying in place is fine as we don't use 'cmd' for launch in this branch.
+            cmd[1] = "init"
             try:
-                # Synchronous execution to ensure we catch launch errors (e.g. image download failure)
-                self.executor.run(
-                    cmd, check=True, capture_output=True, background=False, timeout=300
-                )
-                logger.info(f"Launched instance {name}")
-                return True
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Timed out after 120s"
-                )
-            except subprocess.CalledProcessError as e:
-                err_msg = e.stderr.strip() if e.stderr else str(e)
-                logger.warning(
-                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Exited with code {e.returncode}. Error: {err_msg}"
-                )
+                self.executor.run(cmd, check=True, capture_output=True, timeout=300)
+                logger.info(f"Initialized instance {name}")
             except Exception as e:
-                logger.warning(
-                    f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: {e}"
-                )
-                if attempt < max_retries - 1:
-                    time.sleep(delay)
-                    delay *= 2
-                else:
-                    logger.error(
-                        f"Failed to launch {name} after {max_retries} attempts: {e}"
-                    )
+                logger.error(f"Failed to initialize {name}: {e}")
+                return False
+
+            # 2. Add Devices
+            for dev_name, props in devices.items():
+                # props: {'type': 'nic', 'nictype': 'bridged', ...}
+                dev_type = props.pop(
+                    "type", "nic"
+                )  # Default to nic if not in dict, but should be.
+
+                # Construct config args
+                # incus config device add <inst> <dev> <type> key=val ...
+                cmd_dev = ["incus", "config", "device", "add", name, dev_name, dev_type]
+                for k, v in props.items():
+                    cmd_dev.append(f"{k}={v}")
+
+                try:
+                    self.executor.run(cmd_dev, check=True, capture_output=True)
+                    logger.debug(f"Added device {dev_name} to {name}")
+                except Exception as e:
+                    logger.error(f"Failed to add device {dev_name} to {name}: {e}")
+                    # Try to cleanup
+                    self.delete_instance(name, force=True)
                     return False
-        return False
+
+            # 3. Start
+            cmd_start = ["incus", "start", name]
+            try:
+                self.executor.run(
+                    cmd_start, check=True, capture_output=True, timeout=300
+                )
+                logger.info(f"Started instance {name}")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to start {name}: {e}")
+                # Cleanup? Maybe leave it for debug.
+                return False
+
+        else:
+            # Existing Launch Logic
+            # cmd is already set to launch
+
+            # Retry logic for robust remote deployment
+            max_retries = 3
+            delay = 2
+            for attempt in range(max_retries):
+                try:
+                    # Synchronous execution to ensure we catch launch errors (e.g. image download failure)
+                    self.executor.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        background=False,
+                        timeout=300,
+                    )
+                    logger.info(f"Launched instance {name}")
+                    return True
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Timed out after 120s"
+                    )
+                except subprocess.CalledProcessError as e:
+                    err_msg = e.stderr.strip() if e.stderr else str(e)
+                    logger.warning(
+                        f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: Exited with code {e.returncode}. Error: {err_msg}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Launch attempt {attempt + 1}/{max_retries} failed for {name}: {e}"
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(delay)
+                        delay *= 2
+                    else:
+                        logger.error(
+                            f"Failed to launch {name} after {max_retries} attempts: {e}"
+                        )
+                        return False
+            return False
 
     def delete_instance(self, name: str, force: bool = True) -> bool:
         cmd = ["incus", "delete", name]

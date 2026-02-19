@@ -52,6 +52,17 @@ def bridge_exists(bridge: str, target: str = None) -> bool:
         return False
 
 
+def add_bridge(bridge: str, target: str = None) -> bool:
+    """Creates an OVS bridge."""
+    cmd = _construct_cmd(["sudo", "ovs-vsctl", "--may-exist", "add-br", bridge], target)
+    try:
+        _run_raw(cmd, check=True)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to create bridge {bridge} on {target}: {e}")
+        return False
+
+
 def del_flows(bridge: str, target: str = None) -> bool:
     """
     Deletes all flows from an OVS bridge.
