@@ -9,7 +9,7 @@ from meco.config.loader import CONFIG
 from meco.infra.executors import LocalExecutor, SshExecutor
 from meco.infra.incus import IncusClient
 from meco.network.manager import NetworkManager
-from meco.network import ovs
+
 from meco.emulation import generator
 from meco.emulation.scheduler import Scheduler
 
@@ -192,7 +192,7 @@ class LifecycleManager:
 
         # 2. Launch all nodes in parallel (Fire & Forget)
         # SshExecutor with background=True means this returns almost instantly
-        with ThreadPoolExecutor(max_workers=16) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
             futures = [pool.submit(t) for t in tasks]
             for fut in as_completed(futures):
                 fut.result()
@@ -275,7 +275,48 @@ class LifecycleManager:
         if mac_addr:
             instance_config["volatile.eth0.hwaddr"] = mac_addr
 
-        logger.info(f"Launching {name} on {remote or 'local'}...")
+        # Prepare Devices
+        devices = {}
+
+        if "Satellite" in name:
+            logger.info(f"Configuring interfaces for {name}")
+
+            # Interfaces 1-4: Inter-Satellite Links (Bridged to unmanaged br-int)
+            for i in range(1, 5):
+                if_name = f"eth{i}"
+                mac = generator.generate_mac(node_id, port_index=i)
+                devices[if_name] = {
+                    "type": "nic",
+                    "nictype": "bridged",
+                    "parent": net_manager.bridge_internal,
+                    "hwaddr": mac,
+                }
+
+            # Interface 5: Ground Link (MACVLAN VEPA)
+            if_name = "eth5"
+            mac = generator.generate_mac(node_id, port_index=5)
+            devices[if_name] = {
+                "type": "nic",
+                "nictype": "macvlan",
+                "parent": net_manager.bridge_internal,
+                "mode": "vepa",
+                "hwaddr": mac,
+            }
+
+        else:
+            # For Terminals and GroundStations
+            if_name = "eth1"
+            mac = generator.generate_mac(node_id, port_index=1)
+            devices[if_name] = {
+                "type": "nic",
+                "nictype": "bridged",
+                "parent": net_manager.bridge_internal,
+                "hwaddr": mac,
+            }
+
+        logger.info(
+            f"Launching {name} on {remote or 'local'} with {len(devices)} interfaces"
+        )
         # Note: launching with background=True (implied by SshExecutor changes)
         if not client.launch_instance(
             image=image,
@@ -284,9 +325,9 @@ class LifecycleManager:
             is_vm=is_vm,
             cloud_init_file=final_cloud_file,
             config=instance_config,
+            devices=devices,
         ):
             raise RuntimeError(f"Failed to launch {name} on {remote or 'local'}")
-        # Note: NO waiting here.
 
     def _delete_all_instances(self, force):
         if not hasattr(self, "clients"):
@@ -298,11 +339,15 @@ class LifecycleManager:
             logger.info(f"Checking for instances to clean up on {name}...")
             try:
                 instances = client.list_instances()
-                # logger.debug(f"Instances on {name}: {[i.get('name') for i in instances]}")
+                logger.debug(
+                    f"Instances on {name}: {[i.get('name') for i in instances]}"
+                )
                 to_delete = []
                 for i in instances:
                     # Log config for debugging if needed (at debug level)
-                    # logger.debug(f"Instance {i.get('name')} config: {i.get('config', {})}")
+                    logger.debug(
+                        f"Instance {i.get('name')} config: {i.get('config', {})}"
+                    )
                     is_meco = i.get("config", {}).get("user.meco") == "true"
                     if is_meco:
                         to_delete.append(i["name"])
