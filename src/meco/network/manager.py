@@ -236,8 +236,8 @@ class NetworkManager:
             # [Priority 0] Drop everything by default (Fail-Safe)
             rules.append("table=0,priority=0,actions=drop")
 
-            # [Priority 1] Allow ARP (Flood)
-            rules.append("table=0,priority=1,arp,actions=FLOOD")
+            # [Priority 1] Default Drop for ARP (Instead of Flood)
+            rules.append("table=0,priority=1,arp,actions=drop")
 
             # [Priority 1000] DHCP Bypass (Allow 67/68 to NORMAL)
             rules.append("table=0,priority=1000,udp,tp_src=68,tp_dst=67,actions=NORMAL")
@@ -484,23 +484,10 @@ class NetworkManager:
                 pm = port_map.get(f"{nid}:1")
 
             if not pm:
-                # Last resort: Try 0 if it exists (legacy compatibility)
-                pm = port_map.get(f"{nid}:0")
-
-            if not pm:
                 return None
 
             # pm is (hv, br, port, ip)
-            hv, br, port = pm[0], pm[1], pm[2]
-
-            # IMPORTANT: Determine MAC based on the INDEX we found
-            # If we found index 1, use MAC for index 1
-            # We need to know which index `pm` corresponds to.
-            # Since we looked up specific keys, we know implicitly.
-            # But if we did fallback, we need to correct it.
-
-            # Reverse lookup index? Or just re-check logic.
-            # Let's trust the target_idx unless we fell back.
+            hv, br, port, ip = pm[0], pm[1], pm[2], pm[3]
             final_idx = target_idx
             if port_map.get(f"{nid}:{target_idx}") != pm:
                 if port_map.get(f"{nid}:1") == pm:
@@ -508,8 +495,25 @@ class NetworkManager:
                 elif port_map.get(f"{nid}:0") == pm:
                     final_idx = 0
 
-            mac = generator.generate_mac(nid, final_idx)
-            return (mac, hv, br, port)
+            # --- SATELLITE MACVLAN LOGIC ---
+            # If a Satellite is talking to a Terminal, it uses a terminal-specific MACVLAN.
+            # These are generated with port_index = 100 + Terminal_ID.
+            final_mac_idx = final_idx
+            if "satellite" in my_type and "terminal" in peer_type:
+                final_mac_idx = 100 + peer_id
+
+            mac = generator.generate_mac(nid, final_mac_idx)
+
+            # --- SATELLITE DATA IP LOGIC ---
+            # If we are on a data link (index >= 1) between Sat and Terminal,
+            # we use a deterministic data IP instead of the management IP (pm[3]).
+            if final_idx >= 1 and (
+                ("satellite" in my_type and "terminal" in peer_type)
+                or ("terminal" in my_type and "satellite" in peer_type)
+            ):
+                ip = generator.generate_ip(nid, peer_id, True, my_type, peer_type)
+
+            return (mac, hv, br, port, ip)
 
         links = self._collect_topology_links(topo)
 
@@ -524,8 +528,8 @@ class NetworkManager:
                 logger.warning(f"Skipping link {src_id}->{dst_id}: missing port info")
                 continue
 
-            s_mac, s_hv, s_br, s_port = src_info
-            d_mac, d_hv, d_br, d_port = dst_info
+            s_mac, s_hv, s_br, s_port, s_ip = src_info
+            d_mac, d_hv, d_br, d_port, d_ip = dst_info
 
             # Determine "Link ID" / "Satellite ID" for tunneling
             # Prefer Satellite ID if one is Satellite
@@ -539,17 +543,6 @@ class NetworkManager:
             elif "satellite" in d_type:
                 tunnel_key = dst_id
 
-            # --- Bidirectional Rules Generation ---
-            # We generate A->B and B->A explicitly here because links are undirected in simple topology
-            # But the loop iterates raw links. If links are duplicated in topology (A->B, B->A), we might duplicate rules.
-            # _collect_topology_links usually returns one entry per defined connection.
-            # We should generate both directions for a "connection".
-
-            pairs = [
-                (src_id, s_mac, s_hv, s_br, s_port, dst_id, d_mac, d_hv, d_br, d_port),
-                (dst_id, d_mac, d_hv, d_br, d_port, src_id, s_mac, s_hv, s_br, s_port),
-            ]
-
             for (
                 A_id,
                 A_mac,
@@ -561,8 +554,36 @@ class NetworkManager:
                 B_hv,
                 B_br,
                 B_port,
-            ) in pairs:
-                # Rule: Allow A -> B
+                B_ip,
+            ) in [
+                (
+                    src_id,
+                    s_mac,
+                    s_hv,
+                    s_br,
+                    s_port,
+                    dst_id,
+                    d_mac,
+                    d_hv,
+                    d_br,
+                    d_port,
+                    d_ip,
+                ),
+                (
+                    dst_id,
+                    d_mac,
+                    d_hv,
+                    d_br,
+                    d_port,
+                    src_id,
+                    s_mac,
+                    s_hv,
+                    s_br,
+                    s_port,
+                    s_ip,
+                ),
+            ]:
+                # Rule 1: Allow A -> B (Data)
 
                 # 1. On Source HV (A_hv)
                 if A_hv == B_hv:
@@ -580,6 +601,16 @@ class NetworkManager:
                         f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
                     )
 
+                # 2. On Source HV (A_hv) - Restricted ARP Proxy
+                # If we know B's IP, allow A to resolve it via Proxy ARP
+                if B_ip:
+                    rules[A_hv]["br-int"].append(
+                        f"priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
+                        f"actions=set_field:{B_mac}->dl_dst,resubmit(,0)"
+                    )
+
+                # 3. Tunnel Encapsulation (if remote)
+                if A_hv != B_hv:
                     # br-tun: Encapsulate
                     # Match: patch-int + MACs
                     # Action: set_field:RemoteIP->tun_dst, set_field:LinkID->tun_id, output:vxlan-overlay
@@ -604,45 +635,6 @@ class NetworkManager:
                     rules[B_hv]["br-int"].append(
                         f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
-
-        # --- OVS Proxy ARP / ARP Handler ---
-        # Instead of flooding ARP (which is noisy and inefficient), we convert ARP Requests
-        # to Unicast frames directed at the target. Behave like a "Passive Proxy".
-        # Rule: arp, arp_tpa=<TargetIP>, actions=set_field:<TargetMAC>->dl_dst, resubmit(,0)
-
-        # 1. Collect all known Nodes with IP/MAC
-        # We need to look at port_map to get IPs.
-        # port_map key: "id:index" -> (hv, br, ofport, ip)
-
-        for key, val in port_map.items():
-            if len(val) < 4:
-                continue
-
-            p_hv, p_br, p_ofport, p_ip = val
-            if not p_ip:
-                continue
-
-            try:
-                # Get Node ID and Index from key "id:index"
-                parts = key.split(":")
-                nid = int(parts[0])
-                idx = int(parts[1])
-                p_mac = generator.generate_mac(nid, idx)
-            except Exception:
-                continue
-
-            # 2. Add ARP Responder Rule on ALL hypervisors (br-int)
-            # We want any node on any HV to be able to ARP this target.
-
-            arp_rule = (
-                f"priority=150,arp,arp_tpa={p_ip},arp_op=1,"
-                f"actions=set_field:{p_mac}->dl_dst,resubmit(,0)"
-            )
-
-            for hv in rules:
-                # Add check to ensure we don't accidentally add to a non-existent bridge key
-                if "br-int" in rules[hv]:
-                    rules[hv]["br-int"].append(arp_rule)
 
         return dict(rules)
 

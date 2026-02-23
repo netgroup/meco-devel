@@ -279,8 +279,6 @@ class LifecycleManager:
         devices = {}
 
         if "Satellite" in name:
-            logger.info(f"Configuring interfaces for {name}")
-
             # Interfaces 1-4: Inter-Satellite Links (Bridged to unmanaged br-int)
             for i in range(1, 5):
                 if_name = f"eth{i}"
@@ -292,14 +290,13 @@ class LifecycleManager:
                     "hwaddr": mac,
                 }
 
-            # Interface 5: Ground Link (MACVLAN VEPA)
+            # Interface 5: Ground Link (Bridged)
             if_name = "eth5"
             mac = generator.generate_mac(node_id, port_index=5)
             devices[if_name] = {
                 "type": "nic",
-                "nictype": "macvlan",
+                "nictype": "bridged",
                 "parent": net_manager.bridge_internal,
-                "mode": "vepa",
                 "hwaddr": mac,
             }
 
@@ -384,7 +381,7 @@ class LifecycleManager:
             # However, if port map failed, it logged error.
             return False
 
-        # Apply Flows
+        # 3. Apply Flows
         flows_inserted = False
         for hv, bridges in hv_rules.items():
             for br, rules in bridges.items():
@@ -394,4 +391,172 @@ class LifecycleManager:
                     net_manager.apply_flows(br, rules, target=target)
                     flows_inserted = True
 
+        # 4. Setup Satellite MACVLANs
+        try:
+            logger.info("Setting up Satellite-side MACVLANs...")
+            self._setup_satellite_macvlans(data)
+        except Exception as e:
+            logger.warning(f"Satellite MACVLAN setup semi-failed: {e}")
+
+        # 5. Setup Terminal Data Links (IPs and ARP)
+        try:
+            logger.info("Setting up Terminal data interfaces...")
+            self._setup_terminal_data_links(data)
+        except Exception as e:
+            logger.warning(f"Terminal data link setup semi-failed: {e}")
+
         return flows_inserted
+
+    def _setup_satellite_macvlans(self, data):
+        """
+        Creates MACVLAN interfaces inside Satellites for each visible Terminal.
+        Format: eth5.<terminal_id>
+        """
+        nodes = data.get("nodes", [])
+        node_type_map = {}
+        for n in nodes:
+            try:
+                node_type_map[int(n["id"])] = n["type"].lower()
+            except (ValueError, KeyError):
+                continue
+
+        links = net_manager._collect_topology_links(data)
+
+        # Group by satellite
+        sat_links = defaultdict(list)
+        for a, b in links:
+            a_type = node_type_map.get(a)
+            b_type = node_type_map.get(b)
+
+            if a_type == "satellite" and b_type == "terminal":
+                sat_links[a].append(b)
+            elif b_type == "satellite" and a_type == "terminal":
+                sat_links[b].append(a)
+
+        for sat_id, term_ids in sat_links.items():
+            sat_name = f"{sat_id}-Satellite"
+            remote = self.node_locations.get(sat_name)
+            client = self.clients.get(remote, local_incus_client)
+
+            for term_id in term_ids:
+                iface_name = f"eth5.{term_id}"
+                # Port index 100 + term_id to avoid collision with physical ethX
+                mac = generator.generate_mac(sat_id, port_index=100 + term_id)
+
+                logger.info(
+                    f"Creating MACVLAN {iface_name} in {sat_name} for Terminal {term_id} (MAC: {mac})"
+                )
+
+                # Command to create MACVLAN:
+                # ip link add eth5.2 link eth5 type macvlan mode bridge
+                cmds = [
+                    [
+                        "ip",
+                        "link",
+                        "add",
+                        iface_name,
+                        "link",
+                        "eth5",
+                        "type",
+                        "macvlan",
+                        "mode",
+                        "bridge",
+                    ],
+                    ["ip", "link", "set", iface_name, "address", mac],
+                    ["ip", "link", "set", iface_name, "up"],
+                ]
+
+                # Automated Data Plane IP
+                sat_ip = generator.generate_ip(
+                    sat_id, term_id, True, "Satellite", "Terminal"
+                )
+                term_ip = generator.generate_ip(
+                    sat_id, term_id, False, "Satellite", "Terminal"
+                )
+                term_mac = generator.generate_mac(term_id, 1)  # eth1 on Terminal
+
+                if sat_ip and term_ip:
+                    cmds.append(
+                        ["ip", "addr", "add", f"{sat_ip}/24", "dev", iface_name]
+                    )
+                    # Add static ARP for Terminal to minimize noise/flooding
+                    cmds.append(
+                        [
+                            "ip",
+                            "neigh",
+                            "add",
+                            term_ip,
+                            "lladdr",
+                            term_mac,
+                            "dev",
+                            iface_name,
+                        ]
+                    )
+
+                for cmd in cmds:
+                    # Use absolute path to incus or rely on PATH
+                    full_cmd = ["incus", "exec", sat_name, "--"] + cmd
+                    res = client.executor.run(
+                        full_cmd, check=False, capture_output=True
+                    )
+                    if res.returncode != 0:
+                        logger.error(f"Command failed: {full_cmd} -> {res.stderr}")
+                    else:
+                        logger.debug(f"Command succeeded: {full_cmd}")
+
+    def _setup_terminal_data_links(self, data):
+        """
+        Configures static IPs and ARP neighbors on Terminal data interfaces (eth1).
+        """
+        nodes = data.get("nodes", [])
+        node_id_to_type = {n["id"]: n["type"] for n in nodes}
+        node_id_to_name = {n["id"]: f"{n['id']}-{n['type']}" for n in nodes}
+        node_hv_map = self.node_locations
+
+        links = net_manager._collect_topology_links(data)
+
+        for src_id, dst_id in links:
+            # We are interested in Ground Links: Satellite <-> Terminal
+            src_type = node_id_to_type.get(src_id, "").lower()
+            dst_type = node_id_to_type.get(dst_id, "").lower()
+
+            # Determine Terminal and Satellite
+            if "terminal" in src_type and "satellite" in dst_type:
+                term_id, sat_id = src_id, dst_id
+            elif "terminal" in dst_type and "satellite" in src_type:
+                term_id, sat_id = dst_id, src_id
+            else:
+                continue
+
+            term_name = node_id_to_name.get(term_id)
+            hv = node_hv_map.get(term_name)
+            if not hv:
+                # If not in config instances, check if it's local
+                hv = "local"
+
+            client = self.clients.get(hv)
+            if not client:
+                continue
+
+            # Deterministic IPs and Peer MAC
+            term_ip = generator.generate_ip(
+                term_id, sat_id, True, "Terminal", "Satellite"
+            )
+            sat_ip = generator.generate_ip(
+                term_id, sat_id, False, "Terminal", "Satellite"
+            )
+            sat_mac = generator.generate_mac(
+                sat_id, 100 + term_id
+            )  # MACVLAN MAC on Satellite
+
+            if term_ip and sat_ip:
+                # eth1 is the default data interface on Terminals
+                cmds = [
+                    ["ip", "addr", "add", f"{term_ip}/24", "dev", "eth1"],
+                    ["ip", "link", "set", "eth1", "up"],
+                    ["ip", "neigh", "add", sat_ip, "lladdr", sat_mac, "dev", "eth1"],
+                ]
+
+                for cmd in cmds:
+                    full_cmd = ["incus", "exec", term_name, "--"] + cmd
+                    client.executor.run(full_cmd, check=False, capture_output=True)

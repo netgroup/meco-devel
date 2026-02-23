@@ -70,3 +70,35 @@ def generate_mac(node_id, port_index=0):
         )
     except (ValueError, TypeError):
         return "00:00:00:00:00:00"
+
+
+def generate_ip(node_a_id, node_b_id, is_source, node_a_type="", node_b_type=""):
+    """
+    Generates a deterministic IP address for a link between two nodes.
+    Currently optimized for Satellite-Terminal ground links.
+
+    Subnet: 10.<terminal_node_id>.<satellite_node_id>.x
+    .1 -> Satellite, .2 -> Terminal
+    """
+    try:
+        a_id = int(node_a_id)
+        b_id = int(node_b_id)
+
+        # Identify which one is the terminal (generally the one with higher ID in testbeds,
+        # or we check types if provided)
+        # Using a simple heuristic for now: higher ID is likely terminal in small testbeds,
+        # but better to use types if available.
+
+        t_id, s_id = (a_id, b_id) if "terminal" in node_a_type.lower() else (b_id, a_id)
+
+        # If types were not conclusive, fallback to a deterministic order
+        if (
+            "satellite" not in node_a_type.lower()
+            and "terminal" not in node_a_type.lower()
+        ):
+            t_id, s_id = (max(a_id, b_id), min(a_id, b_id))
+
+        ip_tail = 1 if is_source == (a_id == s_id) else 2
+        return f"10.{t_id & 0xFF}.{s_id & 0xFF}.{ip_tail}"
+    except (ValueError, TypeError):
+        return None
