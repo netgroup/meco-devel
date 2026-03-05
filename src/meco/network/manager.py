@@ -228,40 +228,40 @@ class NetworkManager:
     def generate_base_rules(self, bridge: str) -> List[str]:
         """
         Returns static initialized rules for br-int or br-tun.
-        Fail-Safe: Default Drop. No Learning.
+        Fail-Safe: Default Drop. Using multiple tables for scalability.
         """
         rules = []
         if bridge == self.bridge_internal:
             # --- br-int ---
-            # [Priority 0] Drop everything by default (Fail-Safe)
+            # [Table 0] Classification
             rules.append("table=0,priority=0,actions=drop")
-
-            # [Priority 1] Default Drop for ARP (Instead of Flood)
-            rules.append("table=0,priority=1,arp,actions=drop")
-
-            # [Priority 1000] DHCP Bypass (Allow 67/68 to NORMAL)
+            # DHCP Bypass
             rules.append("table=0,priority=1000,udp,tp_src=68,tp_dst=67,actions=NORMAL")
             rules.append("table=0,priority=1000,udp,tp_src=67,tp_dst=68,actions=NORMAL")
+            # Send ARP to Table 10
+            rules.append("table=0,priority=1,arp,actions=resubmit(,10)")
+            # Send IP to Table 20 (Unicast Forwarding)
+            rules.append("table=0,priority=1,ip,actions=resubmit(,20)")
 
-            # Note: Explicit flows for MAC-to-MAC will be added at priority=100
-            # Note: Handling ingress from patch-tun?
-            # Flows arriving from br-tun are decapsulated, so they just look like packets from patch-tun.
-            # We don't need a catch-all "resubmit" anymore, because we will have specific rules:
-            # "in_port=patch-tun, dl_dst=MY_MAC -> output:MY_PORT"
+            # [Table 10] ARP Proxy (Default Drop)
+            rules.append("table=10,priority=0,actions=drop")
+
+            # [Table 20] Unicast Forwarding (Default Drop)
+            rules.append("table=20,priority=0,actions=drop")
 
         elif bridge == self.bridge_tunnel:
             # --- br-tun ---
-            # [Priority 0] Drop default
+            # [Table 0] Ingress / Egress Classification
             rules.append("table=0,priority=0,actions=drop")
-
-            # [Priority 1] VxLAN Overlay Ingress -> Patch Int
-            # Traffic arriving from remote hypervisors (via vxlan-overlay)
-            # should be passed to br-int for delivery.
-            # We can just forward all legitimate tunnel traffic to patch-int.
-            # (br-int will drop it if destination MAC is unknown)
+            # Egress (from br-int) -> Table 30
+            rules.append("table=0,priority=1,in_port=patch-int,actions=resubmit(,30)")
+            # Ingress (from vxlan-overlay) -> output:patch-int
             rules.append(
                 "table=0,priority=1,in_port=vxlan-overlay,actions=output:patch-int"
             )
+
+            # [Table 30] Encapsulation (Default Drop)
+            rules.append("table=30,priority=0,actions=drop")
 
         return rules
 
@@ -590,7 +590,7 @@ class NetworkManager:
                     # Local switching (same HV)
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[A_hv]["br-int"].append(
-                        f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
                 else:
                     # Remote switching
@@ -598,15 +598,15 @@ class NetworkManager:
 
                     # br-int: Send to patch-tun
                     rules[A_hv]["br-int"].append(
-                        f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
+                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
                     )
 
                 # 2. On Source HV (A_hv) - Restricted ARP Proxy
                 # If we know B's IP, allow A to resolve it via Proxy ARP
                 if B_ip:
                     rules[A_hv]["br-int"].append(
-                        f"priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
-                        f"actions=set_field:{B_mac}->dl_dst,resubmit(,0)"
+                        f"table=10,priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
+                        f"actions=set_field:{B_mac}->dl_dst,resubmit(,20)"
                     )
 
                 # 3. Tunnel Encapsulation (if remote)
@@ -617,7 +617,7 @@ class NetworkManager:
                     remote_ip = get_hv_ip(B_hv)
                     if remote_ip:
                         rules[A_hv]["br-tun"].append(
-                            f"priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
+                            f"table=30,priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
                             f"actions=set_field:{remote_ip}->tun_dst,set_field:0x{tunnel_key:x}->tun_id,output:vxlan-overlay"
                         )
 
@@ -628,12 +628,7 @@ class NetworkManager:
 
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[B_hv]["br-int"].append(
-                        f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
-                    )
-
-                    # br-int: dl_src=A, dl_dst=B -> output:B_port
-                    rules[B_hv]["br-int"].append(
-                        f"priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
 
         return dict(rules)
