@@ -281,34 +281,37 @@ class LifecycleManager:
         if "Satellite" in name:
             # Interfaces 1-4: Inter-Satellite Links (Bridged to unmanaged br-int)
             for i in range(1, 5):
-                if_name = f"eth{i}"
+                if_name = f"isl{i}"
                 mac = generator.generate_mac(node_id, port_index=i)
                 devices[if_name] = {
                     "type": "nic",
                     "nictype": "bridged",
                     "parent": net_manager.bridge_internal,
                     "hwaddr": mac,
+                    "name": if_name,
                 }
 
             # Interface 5: Ground Link (Bridged)
-            if_name = "eth5"
+            if_name = "gsl"
             mac = generator.generate_mac(node_id, port_index=5)
             devices[if_name] = {
                 "type": "nic",
                 "nictype": "bridged",
                 "parent": net_manager.bridge_internal,
                 "hwaddr": mac,
+                "name": if_name,
             }
 
         else:
             # For Terminals and GroundStations
-            if_name = "eth1"
+            if_name = "gsl"
             mac = generator.generate_mac(node_id, port_index=1)
             devices[if_name] = {
                 "type": "nic",
                 "nictype": "bridged",
                 "parent": net_manager.bridge_internal,
                 "hwaddr": mac,
+                "name": if_name,
             }
 
         logger.info(
@@ -410,7 +413,7 @@ class LifecycleManager:
     def _setup_satellite_macvlans(self, data):
         """
         Creates MACVLAN interfaces inside Satellites for each visible Terminal.
-        Format: eth5.<terminal_id>
+        Format: gsl-<terminal_id>
         """
         nodes = data.get("nodes", [])
         node_type_map = {}
@@ -439,7 +442,7 @@ class LifecycleManager:
             client = self.clients.get(remote, local_incus_client)
 
             for term_id in term_ids:
-                iface_name = f"eth5.{term_id}"
+                iface_name = f"gsl-{term_id}"
                 # Port index 100 + term_id to avoid collision with physical ethX
                 mac = generator.generate_mac(sat_id, port_index=100 + term_id)
 
@@ -448,7 +451,7 @@ class LifecycleManager:
                 )
 
                 # Command to create MACVLAN:
-                # ip link add eth5.2 link eth5 type macvlan mode bridge
+                # ip link add gsl-2 link gsl type macvlan mode bridge
                 cmds = [
                     [
                         "ip",
@@ -456,7 +459,7 @@ class LifecycleManager:
                         "add",
                         iface_name,
                         "link",
-                        "eth5",
+                        "gsl",
                         "type",
                         "macvlan",
                         "mode",
@@ -473,7 +476,7 @@ class LifecycleManager:
                 term_ip = generator.generate_ip(
                     sat_id, term_id, False, "Satellite", "Terminal"
                 )
-                term_mac = generator.generate_mac(term_id, 1)  # eth1 on Terminal
+                term_mac = generator.generate_mac(term_id, 1)  # gsl on Terminal
 
                 if sat_ip and term_ip:
                     cmds.append(
@@ -506,7 +509,7 @@ class LifecycleManager:
 
     def _setup_terminal_data_links(self, data):
         """
-        Configures static IPs and ARP neighbors on Terminal data interfaces (eth1).
+        Configures static IPs and ARP neighbors on Terminal data interfaces (gsl).
         """
         nodes = data.get("nodes", [])
         node_id_to_type = {n["id"]: n["type"] for n in nodes}
@@ -550,11 +553,11 @@ class LifecycleManager:
             )  # MACVLAN MAC on Satellite
 
             if term_ip and sat_ip:
-                # eth1 is the default data interface on Terminals
+                # gsl is the default data interface on Terminals
                 cmds = [
-                    ["ip", "addr", "add", f"{term_ip}/24", "dev", "eth1"],
-                    ["ip", "link", "set", "eth1", "up"],
-                    ["ip", "neigh", "add", sat_ip, "lladdr", sat_mac, "dev", "eth1"],
+                    ["ip", "addr", "add", f"{term_ip}/24", "dev", "gsl"],
+                    ["ip", "link", "set", "gsl", "up"],
+                    ["ip", "neigh", "add", sat_ip, "lladdr", sat_mac, "dev", "gsl"],
                 ]
 
                 for cmd in cmds:

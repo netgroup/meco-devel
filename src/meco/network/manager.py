@@ -458,14 +458,14 @@ class NetworkManager:
         def get_node_info(nid, peer_id):
             # Determine appropriate interface index
             # Rules:
-            # - Terminals/GS -> Satellite: use eth1 (idx 1)
-            # - Satellite -> Terminals/GS: use eth5 (idx 5)
-            # - Satellite -> Satellite: use eth1 (idx 1) [Default ISL]
+            # - Terminals/GS -> Satellite: use gsl (idx 1 on Term/GS)
+            # - Satellite -> Terminals/GS: use gsl (idx 5 on Sat)
+            # - Satellite -> Satellite: use isl1-4 (idx 1-4)
 
             my_type = node_type.get(nid, "")
             peer_type = node_type.get(peer_id, "")
 
-            target_idx = 1  # Default to eth1 (Data)
+            target_idx = 1  # Default to gsl (Data)
 
             if "satellite" in my_type:
                 if "satellite" in peer_type:
@@ -477,10 +477,10 @@ class NetworkManager:
             pm = port_map.get(f"{nid}:{target_idx}")
 
             # Fallback: If specific interface not found, try finding ANY interface on br-int
-            # This handles cases where maybe eth5 failed to map but eth1 is there
+            # This handles cases where maybe gsl failed to map but gsl-idx1 is there
             if not pm and "satellite" in my_type and target_idx == 5:
-                logger.debug(f"Missing eth5 for Sat {nid}, checking fallbacks...")
-                # Try index 1
+                logger.debug(f"Missing gsl for Sat {nid}, checking fallbacks...")
+                # Try index 1 (legacy or other data interface)
                 pm = port_map.get(f"{nid}:1")
 
             if not pm:
@@ -801,14 +801,18 @@ class NetworkManager:
                         ipv4 = addr.get("address")
                         break
 
-                # Check ethX
-                if not iface.startswith("eth"):
+                # Interface index mapping logic
+                if iface.startswith("isl"):
+                    idx = int(re.findall(r"\d+", iface)[0])
+                elif iface == "gsl":
+                    # Heuristic: Satellite has gsl at index 5, Terminal at index 1
+                    idx = 5 if "Satellite" in name else 1
+                elif iface.startswith("eth"):
+                    idx = int(re.findall(r"\d+", iface)[0])
+                else:
                     continue
 
                 try:
-                    # Parse index
-                    idx = int(re.findall(r"\d+", iface)[0])
-
                     # Get host device
                     host_dev = data.get("host_name")
                     if not host_dev:
@@ -904,7 +908,7 @@ class NetworkManager:
         # sudo ovs-vsctl port-to-br <interface>
         br_name = run_ssh(["sudo", "ovs-vsctl", "port-to-br", interface])
 
-        # FIX: For MACVLAN/VEPA (e.g. eth5), the host_name is often the bridge itself (e.g. br-int).
+        # FIX: For MACVLAN/VEPA (e.g. gsl-X), the host_name is often the bridge itself (e.g. br-int).
         # ovs-vsctl port-to-br br-int fails. We must detect this.
         if not br_name:
             if interface == self.bridge_internal or interface == self.bridge_tunnel:
