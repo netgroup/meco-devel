@@ -11,7 +11,7 @@ from meco.infra.incus import IncusClient
 from meco.network.manager import NetworkManager
 
 from meco.emulation import generator
-from meco.emulation.scheduler import Scheduler
+from meco.emulation.scheduler import Scheduler, TopologyScheduler
 
 from meco.utils.logger import setup_logging
 
@@ -34,6 +34,7 @@ class LifecycleManager:
     def __init__(self):
         self.clients = {"local": local_incus_client}
         self.node_locations = {}  # name -> remote_alias (or None for local)
+        self.topology_scheduler = None
         self._init_clients()
 
     def _init_clients(self):
@@ -95,9 +96,13 @@ class LifecycleManager:
         with open(ACTIVITY_FLAG, "w") as f:
             f.write(str(time.time()))
 
-        # 4. Set Activity Flag
-        with open(ACTIVITY_FLAG, "w") as f:
-            f.write(str(time.time()))
+        # 5. Start dynamic topology scheduler
+        try:
+            yield "Starting dynamic topology updates..."
+            self.topology_scheduler = TopologyScheduler(topology_data, net_manager)
+            self.topology_scheduler.start()
+        except Exception as e:
+            logger.error(f"Failed to start TopologyScheduler: {e}")
 
         yield {"success": True, "flows_inserted": flows_inserted, "dry_run": False}
 
@@ -110,6 +115,10 @@ class LifecycleManager:
 
         logger.info("Shutting down emulation...")
         yield "Identifying active instances..."
+
+        if hasattr(self, "topology_scheduler") and self.topology_scheduler:
+            logger.info("Stopping dynamic scheduler...")
+            self.topology_scheduler.stop()
 
         # 1. Delete Instances
         yield "Stopping instances..."
@@ -144,6 +153,7 @@ class LifecycleManager:
             if name not in self.node_locations:
                 unassigned_nodes.append(name)
 
+        if unassigned_nodes:
             logger.info(f"Scheduling {len(unassigned_nodes)} unassigned instances...")
             # Use only remote clients if available, otherwise fallback to local
             all_hvs = list(self.clients.keys())
@@ -375,7 +385,7 @@ class LifecycleManager:
         logger.info("Configuring network flows (OF13)...")
 
         # New method handles waiting for IPs and flow generation
-        hv_rules = net_manager.generate_visibility_rules(data, vlan_id=3)
+        hv_rules = net_manager.generate_visibility_rules(data)
 
         if not hv_rules:
             logger.warning("No flows generated or port map empty.")

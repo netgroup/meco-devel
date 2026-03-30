@@ -355,3 +355,41 @@ def get_interface_ofport(interface: str, target: str = None) -> int | None:
             pass
 
     return None
+
+
+def del_flows_by_cookie(bridge: str, cookie: str, target: str = None) -> bool:
+    """
+    Deletes flows from an OVS bridge matching a specific cookie/mask (e.g. '0x5A70/-1').
+    """
+    base_cmd = ["sudo", "ovs-ofctl", "del-flows", bridge, f"cookie={cookie}"]
+    
+    if target:
+        cmd = _construct_cmd(base_cmd, target)
+        try:
+            _run_raw(cmd, check=True)
+            logger.info(f"Cleared cookie flows {cookie} from {bridge} on {target}")
+            return True
+        except Exception as e:
+            logger.debug(f"del-flows by cookie failed on {target} for {bridge}: {e}")
+            return False
+
+    # Fallback / Local
+    try:
+        if _run_raw(base_cmd, check=True).returncode == 0:
+            logger.info(f"Cleared cookie flows {cookie} from {bridge} (local)")
+            return True
+    except Exception as e:
+        logger.debug(f"Local del-flows by cookie failed: {e}")
+
+    # Try Remotes
+    for hv in CONFIG.get("hypervisors", {}):
+        cmd_remote = _construct_cmd(base_cmd, hv)
+        try:
+            _run_raw(cmd_remote, check=True)
+            logger.info(f"Cleared cookie flows {cookie} from {bridge} on {hv}")
+            return True
+        except Exception:
+            continue
+
+    logger.error(f"Failed to delete flows by cookie {cookie} from {bridge}")
+    return False

@@ -278,141 +278,16 @@ class NetworkManager:
         for rule in flows:
             ovs.add_flow(bridge, rule, target=target)
 
-    def generate_flows(
-        self, topo: dict, port_map: Dict[str, Tuple[str, str, int]], vlan_id: int = 3
-    ) -> Dict[str, Dict[str, List[str]]]:
+    def apply_visibility_rules(self, bridge: str, flows: list, target: str = None):
         """
-        Generates OVS flows based on topology visibility and port mapping.
-        Returns: { hypervisor: { bridge: [flow_rules...] } }
+        Applies visibility flows by cleaning up old cookie=0x5A70 rules first.
         """
-        if not port_map:
-            logger.warning("No port map available. Cannot generate rules.")
-            return {}
-
-        # Build node type map
-        node_type = {}
-        for n in topo.get("nodes", []):
-            try:
-                nid = int(n.get("id"))
-                node_type[nid] = str(n.get("type", "")).lower()
-            except Exception:
-                continue
-
-        # Collect links
-        links = self._collect_topology_links(topo)
-        if not links:
-            return {}
-
-        def pm_entry(nid):
-            # Look for eth0 -> "nid:0"
-            return port_map.get(f"{nid}:0")
-
-        # Group terminals per satellite
-        # Key: (hv, br, sat_id), Value: {sat_port, term_ports[]}
-        sat_groups = {}
-
-        for a, b in links:
-            a_type = node_type.get(a, "")
-            b_type = node_type.get(b, "")
-
-            if a_type == "satellite" and b_type == "terminal":
-                sat_id, te_id = a, b
-            elif b_type == "satellite" and a_type == "terminal":
-                sat_id, te_id = b, a
-            else:
-                continue
-
-            sat_pm = pm_entry(sat_id)
-            te_pm = pm_entry(te_id)
-            if not sat_pm or not te_pm:
-                continue
-
-            sat_hv, sat_br, sat_port = sat_pm
-            te_hv, te_br, te_port = te_pm
-
-            if sat_hv != te_hv or sat_br != te_br:
-                logger.warning(f"Skipping cross-domain link {sat_id}<->{te_id}")
-                continue
-
-            key = (sat_hv, sat_br, sat_id)
-            if key not in sat_groups:
-                sat_groups[key] = {"sat_port": sat_port, "term_ports": []}
-            sat_groups[key]["term_ports"].append(te_port)
-
-        # Assemble rules
-        hv_bridge_rules = defaultdict(lambda: defaultdict(list))
-        baseline_cache = set()
-
-        hv_br_ports = defaultdict(set)
-        for (hv, br, _), grp in sat_groups.items():
-            hv_br_ports[(hv, br)].add(grp["sat_port"])
-            hv_br_ports[(hv, br)].update(grp["term_ports"])
-
-        for (hv, br, sat_id), grp in sat_groups.items():
-            sat_port = grp["sat_port"]
-            term_ports = sorted(set(grp["term_ports"]))
-            if not term_ports:
-                continue
-
-            if (hv, br) not in baseline_cache:
-                # ARP Rules
-                all_ports = sorted(hv_br_ports[(hv, br)])
-                for in_p in all_ports:
-                    other_ports = [p for p in all_ports if p != in_p]
-                    if other_ports:
-                        out_str = ",".join(f"output:{p}" for p in other_ports)
-                        hv_bridge_rules[hv][br].append(
-                            f"table=0,priority=200,in_port={in_p},arp,actions={out_str}"
-                        )
-
-                # Baseline Tables
-                hv_bridge_rules[hv][br].extend(
-                    [
-                        "table=22,priority=0,actions=drop",
-                        "table=20,priority=0,actions=resubmit(,5)",
-                        "table=5,priority=0,actions=resubmit(,22)",
-                        (
-                            "table=9,priority=1,actions="
-                            "learn(table=20,priority=1,hard_timeout=60,"
-                            "NXM_OF_VLAN_TCI[0..11],"
-                            "NXM_OF_ETH_DST[]=NXM_OF_ETH_SRC[],"
-                            "load:NXM_OF_VLAN_TCI[]->NXM_OF_VLAN_TCI[],"
-                            "output:NXM_OF_IN_PORT[])"
-                        ),
-                    ]
-                )
-                baseline_cache.add((hv, br))
-
-            # SAT -> Tag -> Table 20
-            hv_bridge_rules[hv][br].append(
-                f"cookie=0x102,table=0,priority=100,in_port={sat_port},vlan_tci=0,"
-                f"actions=load:0x{vlan_id:x}->NXM_OF_VLAN_TCI[],resubmit(,20)"
-            )
-
-            # Downlink Table 5 -> Strip Tag -> Terminals
-            actions = []
-            for te_p in term_ports:
-                actions.append("load:0->NXM_OF_VLAN_TCI[]")
-                actions.append(f"output:{te_p}")
-            hv_bridge_rules[hv][br].append(
-                f"cookie=0x103,table=5,priority=100,vlan_tci=0x{vlan_id:x}/0x0fff,actions="
-                + ",".join(actions)
-            )
-
-            # Uplink Term -> Tag -> Learn -> Strip -> SAT
-            for idx, te_p in enumerate(term_ports):
-                cookie = 0x100 + idx
-                hv_bridge_rules[hv][br].append(
-                    f"cookie=0x{cookie:x},table=0,priority=100,in_port={te_p},vlan_tci=0,"
-                    f"actions=load:0x{vlan_id:x}->NXM_OF_VLAN_TCI[],resubmit(,9),load:0->NXM_OF_VLAN_TCI[],output:{sat_port}"
-                )
-
-        # Convert defaultdict to dict for cleaner return
-        # (Though defaultdict is fine, the signature says Dict)
-        return {h: dict(b) for h, b in hv_bridge_rules.items()}
+        ovs.del_flows_by_cookie(bridge, "0x5A70/-1", target=target)
+        for rule in flows:
+            ovs.add_flow(bridge, rule, target=target)
 
     def generate_visibility_rules(
-        self, topo: dict, vlan_id: int = 0x03, tun_id: int = 0x17
+        self, topo: dict, epoch_time: int = 0
     ) -> Dict[str, Dict[str, List[str]]]:
         """
         Generates OpenFlow rules for MAC-based switching.
@@ -515,7 +390,7 @@ class NetworkManager:
 
             return (mac, hv, br, port, ip)
 
-        links = self._collect_topology_links(topo)
+        links = self._collect_topology_links(topo, epoch_time)
 
         # Result structure: hv -> bridge -> rules
         rules = defaultdict(lambda: defaultdict(list))
@@ -590,7 +465,7 @@ class NetworkManager:
                     # Local switching (same HV)
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[A_hv]["br-int"].append(
-                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
                 else:
                     # Remote switching
@@ -598,14 +473,14 @@ class NetworkManager:
 
                     # br-int: Send to patch-tun
                     rules[A_hv]["br-int"].append(
-                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
+                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
                     )
 
                 # 2. On Source HV (A_hv) - Restricted ARP Proxy
                 # If we know B's IP, allow A to resolve it via Proxy ARP
                 if B_ip:
                     rules[A_hv]["br-int"].append(
-                        f"table=10,priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
+                        f"cookie=0x5A70,table=10,priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
                         f"actions=set_field:{B_mac}->dl_dst,resubmit(,20)"
                     )
 
@@ -617,7 +492,7 @@ class NetworkManager:
                     remote_ip = get_hv_ip(B_hv)
                     if remote_ip:
                         rules[A_hv]["br-tun"].append(
-                            f"table=30,priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
+                            f"cookie=0x5A70,table=30,priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
                             f"actions=set_field:{remote_ip}->tun_dst,set_field:0x{tunnel_key:x}->tun_id,output:vxlan-overlay"
                         )
 
@@ -628,20 +503,23 @@ class NetworkManager:
 
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[B_hv]["br-int"].append(
-                        f"table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
 
         return dict(rules)
 
-    def _collect_topology_links(self, topo: dict) -> List[Tuple[int, int]]:
+    def _collect_topology_links(
+        self, topo: dict, epoch_time: int = 0
+    ) -> List[Tuple[int, int]]:
         links = []
         for section in ("visibility-constellation", "visibility-ground"):
             for snap in topo.get(section, []):
-                for conn in snap.get("connection", []):
-                    src = conn.get("source")
-                    dst = conn.get("destination")
-                    if src is not None and dst is not None:
-                        links.append((src, dst))
+                if snap.get("time") == epoch_time:
+                    for conn in snap.get("connection", []):
+                        src = conn.get("source")
+                        dst = conn.get("destination")
+                        if src is not None and dst is not None:
+                            links.append((src, dst))
         return links
 
     def build_port_map(

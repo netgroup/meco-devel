@@ -441,16 +441,30 @@ class IncusClient:
 
             # 3. Start
             cmd_start = ["incus", "start", name]
-            try:
-                self.executor.run(
-                    cmd_start, check=True, capture_output=True, timeout=300
-                )
-                logger.info(f"Started instance {name}")
-                return True
-            except Exception as e:
-                logger.error(f"Failed to start {name}: {e}")
-                # Cleanup? Maybe leave it for debug.
-                return False
+            max_start_retries = 3
+            start_delay = 2
+            
+            for attempt in range(max_start_retries):
+                try:
+                    self.executor.run(
+                        cmd_start, check=True, capture_output=True, timeout=300
+                    )
+                    logger.info(f"Started instance {name}")
+                    return True
+                except subprocess.CalledProcessError as e:
+                    err_msg = e.stderr.strip() if e.stderr else str(e)
+                    logger.warning(f"Start attempt {attempt + 1}/{max_start_retries} failed for {name}: {err_msg}")
+                    if attempt < max_start_retries - 1:
+                        time.sleep(start_delay)
+                        start_delay *= 2
+                except Exception as e:
+                    logger.warning(f"Start attempt {attempt + 1}/{max_start_retries} failed for {name}: {e}")
+                    if attempt < max_start_retries - 1:
+                        time.sleep(start_delay)
+                        start_delay *= 2
+                        
+            logger.error(f"Failed to start {name} after {max_start_retries} attempts.")
+            return False
 
         else:
             # Existing Launch Logic
