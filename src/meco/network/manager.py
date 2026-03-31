@@ -9,10 +9,11 @@ import time
 import json
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional, Set
+from meco.utils.logger import setup_logging
 import subprocess
 import shlex
 
-logger = logging.getLogger("meco.network.manager")
+logger = setup_logging("meco.network.manager")
 
 # Initialize infrastructure clients
 # In a rigorous dependency injection model, these would be passed in.
@@ -282,8 +283,12 @@ class NetworkManager:
         """
         Applies visibility flows by cleaning up old cookie=0x5A70 rules first.
         """
+        logger.info(f"Deleting previous epoch OpenFlow rules from {bridge} on {target or 'local'}...")
         ovs.del_flows_by_cookie(bridge, "0x5A70/-1", target=target)
-        for rule in flows:
+        
+        logger.info(f"Inserting {len(flows)} new OpenFlow epoch rules to {bridge} on {target or 'local'}...")
+        for i, rule in enumerate(flows):
+            logger.info(f"  -> Rule [{i+1}/{len(flows)}]: {rule}")
             ovs.add_flow(bridge, rule, target=target)
 
     def generate_visibility_rules(

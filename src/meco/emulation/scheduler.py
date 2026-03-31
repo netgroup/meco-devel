@@ -5,8 +5,9 @@ import time
 from typing import Dict, List
 
 from meco.network.manager import NetworkManager
+from meco.utils.logger import setup_logging
 
-logger = logging.getLogger("meco.scheduler")
+logger = setup_logging("meco.scheduler")
 
 
 class Scheduler:
