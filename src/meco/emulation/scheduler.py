@@ -78,6 +78,7 @@ class TopologyScheduler:
         # Parse all unique timestamps and sort them
         self.timestamps = self._extract_timestamps(topo)
         self.start_time = 0.0
+        self.previous_links = set()
 
     def _extract_timestamps(self, topo: dict) -> List[int]:
         times = set()
@@ -131,17 +132,20 @@ class TopologyScheduler:
 
             logger.info(f"[Scheduler] Activating epoch {epoch}")
             try:
-                # Generate new rules specifically for this epoch
-                rules_per_hv = self.network_manager.generate_visibility_rules(self.topo, epoch_time=epoch)
+                # 1. Fetch current links for this epoch
+                current_links = set(self.network_manager._collect_topology_links(self.topo, epoch_time=epoch))
                 
-                # Apply the rules
-                for hv, br_rules in rules_per_hv.items():
-                    for br, flows in br_rules.items():
-                        # Determine if we should target a remote hypervisor
-                        target_remote = hv if hv and hv != "local" else None
-                        self.network_manager.apply_visibility_rules(br, flows, target=target_remote)
+                # 2. Calculate delta
+                links_to_add = current_links - self.previous_links
+                links_to_remove = self.previous_links - current_links
+                
+                # 3. Apply changes incrementally
+                self.network_manager.apply_topology_delta(links_to_add, links_to_remove, self.topo)
+                
+                # 4. Update state
+                self.previous_links = current_links
                         
-                logger.info(f"[Scheduler] Successfully applied flows for epoch {epoch}")
+                logger.info(f"[Scheduler] Successfully applied flows for epoch {epoch} (Added: {len(links_to_add)}, Removed: {len(links_to_remove)})")
             except Exception as e:
                 logger.error(f"[Scheduler] Failed to apply epoch {epoch}: {e}", exc_info=True)
                 

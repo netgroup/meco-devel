@@ -279,20 +279,42 @@ class NetworkManager:
         for rule in flows:
             ovs.add_flow(bridge, rule, target=target)
 
-    def apply_visibility_rules(self, bridge: str, flows: list, target: str = None):
+    def _get_link_cookie(self, src_id: int, dst_id: int) -> str:
+        """Generates a unique hex cookie for the un-directed link pair starting with 0x99."""
+        link_id = (min(src_id, dst_id) << 12) | max(src_id, dst_id)
+        return f"0x99{link_id:06x}"
+
+    def apply_topology_delta(self, links_to_add: set, links_to_remove: set, topo: dict):
         """
-        Applies visibility flows by cleaning up old cookie=0x5A70 rules first.
+        Applies changes to topology incrementally based on deltas.
         """
-        logger.info(f"Deleting previous epoch OpenFlow rules from {bridge} on {target or 'local'}...")
-        ovs.del_flows_by_cookie(bridge, "0x5A70/-1", target=target)
-        
-        logger.info(f"Inserting {len(flows)} new OpenFlow epoch rules to {bridge} on {target or 'local'}...")
-        for i, rule in enumerate(flows):
-            logger.info(f"  -> Rule [{i+1}/{len(flows)}]: {rule}")
-            ovs.add_flow(bridge, rule, target=target)
+        # 1. Delete removed links
+        for src, dst in links_to_remove:
+            cookie = self._get_link_cookie(src, dst)
+            logger.info(f"Deleting broken link {src}->{dst} rules with cookie={cookie} from all relevant bridges...")
+            hypervisors = CONFIG.get("hypervisors", {})
+            targets = list(hypervisors.keys()) if hypervisors else [None]
+            for hv in targets:
+                for br in [self.bridge_internal, self.bridge_tunnel]:
+                    try:
+                        ovs.del_flows_by_cookie(br, f"{cookie}/-1", target=hv)
+                    except Exception as e:
+                        logger.debug(f"Failed to delete flow with cookie {cookie} on {hv}/{br}: {e}")
+
+        # 2. Add new links
+        if links_to_add:
+            logger.info(f"Generating new rules for {len(links_to_add)} added links...")
+            rules_per_hv = self.generate_visibility_rules(topo, links_to_add)
+            for hv, br_rules in rules_per_hv.items():
+                for br, flows in br_rules.items():
+                    target_remote = hv if hv and hv != "local" else None
+                    logger.info(f"Inserting {len(flows)} new OpenFlow rules to {br} on {target_remote or 'local'}...")
+                    for i, rule in enumerate(flows):
+                        logger.info(f"  -> Rule [{i+1}/{len(flows)}]: {rule}")
+                        ovs.add_flow(br, rule, target=target_remote)
 
     def generate_visibility_rules(
-        self, topo: dict, epoch_time: int = 0
+        self, topo: dict, links: set
     ) -> Dict[str, Dict[str, List[str]]]:
         """
         Generates OpenFlow rules for MAC-based switching.
@@ -395,12 +417,11 @@ class NetworkManager:
 
             return (mac, hv, br, port, ip)
 
-        links = self._collect_topology_links(topo, epoch_time)
-
         # Result structure: hv -> bridge -> rules
         rules = defaultdict(lambda: defaultdict(list))
 
         for src_id, dst_id in links:
+            cookie_hex = self._get_link_cookie(src_id, dst_id)
             src_info = get_node_info(src_id, dst_id)
             dst_info = get_node_info(dst_id, src_id)
 
@@ -470,7 +491,7 @@ class NetworkManager:
                     # Local switching (same HV)
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[A_hv]["br-int"].append(
-                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"cookie={cookie_hex},table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
                 else:
                     # Remote switching
@@ -478,14 +499,14 @@ class NetworkManager:
 
                     # br-int: Send to patch-tun
                     rules[A_hv]["br-int"].append(
-                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
+                        f"cookie={cookie_hex},table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:patch-tun"
                     )
 
                 # 2. On Source HV (A_hv) - Restricted ARP Proxy
                 # If we know B's IP, allow A to resolve it via Proxy ARP
                 if B_ip:
                     rules[A_hv]["br-int"].append(
-                        f"cookie=0x5A70,table=10,priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
+                        f"cookie={cookie_hex},table=10,priority=150,arp,in_port={A_port},arp_tpa={B_ip},arp_op=1,"
                         f"actions=set_field:{B_mac}->dl_dst,resubmit(,20)"
                     )
 
@@ -497,7 +518,7 @@ class NetworkManager:
                     remote_ip = get_hv_ip(B_hv)
                     if remote_ip:
                         rules[A_hv]["br-tun"].append(
-                            f"cookie=0x5A70,table=30,priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
+                            f"cookie={cookie_hex},table=30,priority=100,in_port=patch-int,dl_src={A_mac},dl_dst={B_mac},"
                             f"actions=set_field:{remote_ip}->tun_dst,set_field:0x{tunnel_key:x}->tun_id,output:vxlan-overlay"
                         )
 
@@ -508,7 +529,7 @@ class NetworkManager:
 
                     # br-int: dl_src=A, dl_dst=B -> output:B_port
                     rules[B_hv]["br-int"].append(
-                        f"cookie=0x5A70,table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
+                        f"cookie={cookie_hex},table=20,priority=100,dl_src={A_mac},dl_dst={B_mac},actions=output:{B_port}"
                     )
 
         return dict(rules)

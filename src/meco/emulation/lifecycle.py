@@ -384,25 +384,16 @@ class LifecycleManager:
     def _configure_network(self, data):
         logger.info("Configuring network flows (OF13)...")
 
-        # New method handles waiting for IPs and flow generation
-        hv_rules = net_manager.generate_visibility_rules(data)
+        # Get initial links for Epoch 0
+        links = set(net_manager._collect_topology_links(data, epoch_time=0))
 
-        if not hv_rules:
-            logger.warning("No flows generated or port map empty.")
-            # The new method returns empty dict on failure/empty map
-            # We should probably return False if it really failed, but empty might be valid for no visibility
-            # However, if port map failed, it logged error.
-            return False
-
-        # 3. Apply Flows
-        flows_inserted = False
-        for hv, bridges in hv_rules.items():
-            for br, rules in bridges.items():
-                if rules:
-                    logger.info(f"Applying {len(rules)} rules to {hv or 'local'}:{br}")
-                    target = hv if hv else None
-                    net_manager.apply_flows(br, rules, target=target)
-                    flows_inserted = True
+        if not links:
+            logger.warning("No initial links found for Epoch 0.")
+            flows_inserted = False
+        else:
+            # Use the new incremental delta method to apply initial rules
+            net_manager.apply_topology_delta(links_to_add=links, links_to_remove=set(), topo=data)
+            flows_inserted = True
 
         # 4. Setup Satellite MACVLANs
         try:
